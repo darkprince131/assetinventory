@@ -1,0 +1,154 @@
+<script>
+/* ------------------------------------------------------------------ Dashboard
+ * Stat cards, attention list, category/location breakdowns, recent activity,
+ * plus the canned report buttons (also reachable at #/reports).
+ */
+
+App.pages.dashboard = {
+  render: function (c) {
+    App.call('api_getDashboard').then(function (d) {
+      c.innerHTML = Dash.html(d);
+      Dash.wire(c);
+    }).catch(function (e) { UI.error(e.message); c.innerHTML = ''; });
+  }
+};
+
+App.pages.reports = {
+  render: function (c) {
+    c.innerHTML =
+      '<div class="pagehead"><div><h1>Reports</h1>' +
+      '<p class="sub">Every report downloads a CSV, or can be written to a new tab in the sheet.</p></div></div>' +
+      Dash.reportsHtml();
+    Dash.wireReports(c);
+  }
+};
+
+var Dash = {
+  html: function (d) {
+    var cards = [
+      ['Total assets', d.cards.total, '#/assets'],
+      ['Assigned', d.cards.assigned, '#/assets?status=Assigned'],
+      ['In stock', d.cards.inStock, '#/assets?status=In%20Stock'],
+      ['In repair', d.cards.inRepair, '#/assets?status=In%20Repair'],
+      ['Rented / leased', d.cards.rented, '#/assets?ownership=Rented,Leased'],
+      ['Retired this FY', d.cards.retiredFy, '#/assets?status=Retired']
+    ].map(function (x) {
+      return '<a class="stat" href="' + x[2] + '"><div class="n">' + x[1] + '</div><div class="l">' + esc(x[0]) + '</div></a>';
+    }).join('');
+
+    var sev = ['bad', 'bad', 'warn', 'ok'];
+    var attention = d.attention.length
+      ? '<table class="data"><thead><tr><th style="width:130px">Type</th><th>Item</th><th style="width:90px">Asset</th></tr></thead><tbody>' +
+        d.attention.map(function (a) {
+          return '<tr><td class="nowrap"><span class="dot ' + (sev[a.severity] || 'warn') + '"></span>' + esc(a.kind) + '</td>' +
+            '<td>' + esc(a.text) + '</td>' +
+            '<td class="nowrap"><a href="#/assets/' + encodeURIComponent(a.asset_id) + '">' + esc(a.asset_id) + '</a></td></tr>';
+        }).join('') + '</tbody></table>'
+      : '<p class="muted">Nothing needs attention.</p>';
+
+    var maxCat = Math.max.apply(null, d.byCategory.map(function (r) { return r.count; }).concat([1]));
+    var byCat = d.byCategory.map(function (r) {
+      return '<div class="barrow"><div><a href="#/assets?category=' + encodeURIComponent(r.name) + '">' + esc(r.name) + '</a></div>' +
+        '<div class="bar"><div style="width:' + Math.round((r.count / maxCat) * 100) + '%"></div></div>' +
+        '<div class="right muted">' + r.count + ' · ' + r.pct + '%</div></div>';
+    }).join('') || '<p class="muted">No assets yet.</p>';
+
+    var byLoc = '<table class="data"><thead><tr><th>Location</th><th class="num">Total</th><th class="num">Assigned</th>' +
+      '<th class="num">In stock</th><th class="num">In repair</th></tr></thead><tbody>' +
+      (d.byLocation.map(function (r) {
+        return '<tr><td><a href="#/assets?location=' + encodeURIComponent(r.location_id) + '">' + esc(r.name) + '</a></td>' +
+          '<td class="num">' + r.total + '</td><td class="num">' + r.assigned + '</td>' +
+          '<td class="num">' + r.inStock + '</td><td class="num">' + r.inRepair + '</td></tr>';
+      }).join('') || '<tr><td colspan="5" class="muted">No assets yet.</td></tr>') + '</tbody></table>';
+
+    var recent = d.recent.length
+      ? d.recent.map(function (r) {
+          return '<div><span class="muted nowrap">' + fmtDateTime(r.timestamp) + '</span> — ' + esc(r.text) + '</div>';
+        }).join('')
+      : '<p class="muted">No activity logged yet.</p>';
+
+    return '' +
+      '<div class="pagehead"><div><h1>Dashboard</h1>' +
+      '<p class="sub">As at ' + fmtDateTime(d.generatedAt) + '</p></div>' +
+      '<div class="actions"><button id="refreshDash">Refresh</button></div></div>' +
+
+      '<div class="grid3" style="grid-template-columns:repeat(6,1fr)">' + cards + '</div>' +
+
+      '<div class="panel mt12"><h2>Total asset value</h2>' +
+      '<div class="row"><div><span class="muted">All non-retired</span><div style="font-size:18px;font-weight:600">₹ ' + fmtMoney(d.value.total) + '</div></div>' +
+      '<div style="margin-left:32px"><span class="muted">Owned</span><div style="font-size:18px;font-weight:600">₹ ' + fmtMoney(d.value.owned) + '</div></div>' +
+      '<div style="margin-left:32px"><span class="muted">Rented / leased</span><div style="font-size:18px;font-weight:600">₹ ' + fmtMoney(d.value.rented) + '</div></div>' +
+      '</div></div>' +
+
+      '<div class="panel mt12"><h2>Attention needed</h2>' + attention + '</div>' +
+
+      '<div class="grid2 mt12">' +
+        '<div class="panel" style="margin-top:0"><h2>By category</h2>' + byCat + '</div>' +
+        '<div class="panel" style="margin-top:0"><h2>By location</h2>' + byLoc + '</div>' +
+      '</div>' +
+
+      '<div class="panel mt12"><h2>Recent activity</h2>' + recent + '</div>' +
+      Dash.reportsHtml();
+  },
+
+  reportsHtml: function () {
+    var rows = App.state.reports.map(function (r) {
+      var extra = '';
+      if (r.id === 'maintenance_cost') {
+        extra = UI.select('rep_group_' + r.id, [
+          { value: 'asset', label: 'by asset' },
+          { value: 'vendor', label: 'by vendor' },
+          { value: 'month', label: 'by month' }
+        ], 'asset', { blank: 'by asset' });
+      }
+      if (r.id === 'assignment_history' || r.id === 'audit_log') {
+        extra = '<div class="row"><input type="date" id="rep_from_' + r.id + '" style="width:140px">' +
+          '<span class="muted">to</span><input type="date" id="rep_to_' + r.id + '" style="width:140px"></div>';
+      }
+      return '<tr><td>' + esc(r.title) + '</td>' +
+        '<td style="width:280px">' + extra + '</td>' +
+        '<td class="nowrap" style="width:230px">' +
+          '<button class="small" data-report="' + r.id + '" data-mode="csv">Download CSV</button> ' +
+          (App.can('Editor') && App.state.mode !== 'local'
+            ? '<button class="small" data-report="' + r.id + '" data-mode="tab">Write to a sheet tab</button>' : '') +
+        '</td></tr>';
+    }).join('');
+    return '<div class="panel mt12"><h2>Reports &amp; exports</h2>' +
+      '<table class="data"><tbody>' + rows + '</tbody></table></div>';
+  },
+
+  wire: function (c) {
+    var btn = c.querySelector('#refreshDash');
+    if (btn) btn.onclick = function () { App.route(); };
+    Dash.wireReports(c);
+  },
+
+  wireReports: function (c) {
+    c.querySelectorAll('button[data-report]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-report');
+        var mode = b.getAttribute('data-mode');
+        var params = {};
+        var g = c.querySelector('#rep_group_' + id);
+        if (g) params.groupBy = g.value || 'asset';
+        var f = c.querySelector('#rep_from_' + id);
+        var t = c.querySelector('#rep_to_' + id);
+        if (f && f.value) params.from = f.value;
+        if (t && t.value) params.to = t.value;
+
+        if (mode === 'csv') {
+          UI.busy(b, 'Building…', App.call('api_getReport', id, params)).then(function (rep) {
+            CSV.download(rep.name + '_' + inputDate(new Date()) + '.csv', CSV.build(rep.headers, rep.rows));
+            UI.ok(rep.title + ': ' + rep.rows.length + ' rows downloaded.');
+          }).catch(function (e) { UI.error(e.message); });
+        } else {
+          UI.busy(b, 'Writing…', App.call('api_reportToTab', id, params)).then(function (res) {
+            UI.ok('Written to tab "' + res.tab + '" (' + res.rows + ' rows).');
+            window.open(res.url, '_blank');
+          }).catch(function (e) { UI.error(e.message); });
+        }
+      };
+    });
+  }
+};
+</script>

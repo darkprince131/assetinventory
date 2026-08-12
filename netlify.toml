@@ -1,0 +1,59 @@
+# Netlify configuration.
+# The Apps Script project in /src is unaffected by any of this — it is the same
+# source, deployed a different way.
+
+[build]
+  # build-logic.js bundles /src/*.gs for the functions; build.js emits the SPA.
+  # Swap --backend=http for --backend=demo to deploy the browser-only demo.
+  command = "node tools/build-logic.js && node web/build.js --backend=http"
+  publish = "web/public"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/auth/login"
+  to = "/.netlify/functions/auth-login"
+  status = 200
+
+[[redirects]]
+  from = "/api/auth/callback"
+  to = "/.netlify/functions/auth-callback"
+  status = 200
+
+[[redirects]]
+  from = "/api/auth/logout"
+  to = "/.netlify/functions/auth-logout"
+  status = 200
+
+[[redirects]]
+  from = "/api"
+  to = "/.netlify/functions/api"
+  status = 200
+
+# Hash routing means every route is served by index.html anyway, but this keeps
+# a stray deep link from 404ing. Must come last: redirects are matched in order.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    # No CDN, no fonts, no analytics. connect-src 'self' is only for /api.
+    Content-Security-Policy = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+
+[[headers]]
+  for = "/js/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/styles.css"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

@@ -1,0 +1,293 @@
+<script>
+/* ------------------------------------------------------------- Bulk import
+ * Four steps, revealed in sequence: template → upload → validate/preview → commit.
+ */
+
+var ImportPage = {
+  CHUNK: 200,
+  state: { entity: 'Assets', columns: [], matchColumn: '', headers: [], rows: [], verdicts: [], errorsOnly: false }
+};
+
+App.pages['import'] = {
+  render: function (c) {
+    if (!App.can('Editor')) {
+      c.innerHTML = '<h1>Bulk import</h1><p class="muted">Import needs Editor access. Your role is ' + esc(App.state.user.role) + '.</p>';
+      return;
+    }
+    ImportPage.state = { entity: 'Assets', columns: [], matchColumn: '', headers: [], rows: [], verdicts: [], errorsOnly: false };
+    c.innerHTML = ImportPage.html();
+    ImportPage.wire(c);
+  }
+};
+
+ImportPage.html = function () {
+  var ents = App.state.importEntities;
+  return '' +
+  '<div class="pagehead"><div><h1>Bulk import</h1>' +
+  '<p class="sub">CSV only, up to 5 MB. Rows are matched on an existing record before anything is written.</p></div></div>' +
+
+  '<div class="step"><h2>1 · Download a template</h2><div class="inner">' +
+    '<div class="row">' + ents.map(function (e) {
+      return '<button data-template="' + esc(e) + '">' + esc(e) + ' template</button>';
+    }).join('') + '</div>' +
+    '<p class="muted mt8">Each template carries the correct headers, two example rows, and comment lines ' +
+    'listing the valid values. Comment lines starting with # are ignored on upload.</p>' +
+  '</div></div>' +
+
+  '<div class="step"><h2>2 · Upload</h2><div class="inner">' +
+    '<div class="row">' +
+      '<div style="width:200px">' + UI.select('impEntity', ents, 'Assets', { blank: '' }) + '</div>' +
+      '<input type="file" id="impFile" accept=".csv,text/csv" style="width:auto">' +
+    '</div>' +
+    '<div id="impFileInfo" class="muted mt8"></div>' +
+  '</div></div>' +
+
+  '<div class="step disabled" id="step3"><h2>3 · Validate &amp; preview</h2><div class="inner">' +
+    '<div id="impSummary"></div>' +
+    '<div class="row mt8">' +
+      '<label class="row" style="gap:6px"><input type="checkbox" id="impErrorsOnly" style="width:auto"> Errors only</label>' +
+      '<button class="small" id="impErrCsv">Download error rows as CSV</button>' +
+    '</div>' +
+    '<div id="impPreview" class="mt8"></div>' +
+  '</div></div>' +
+
+  '<div class="step disabled" id="step4"><h2>4 · Commit</h2><div class="inner">' +
+    '<label class="row" style="gap:6px"><input type="checkbox" id="impSkip" style="width:auto"> Skip error rows and import the rest</label>' +
+    '<div class="row mt8"><button class="primary" id="impCommit" disabled>Commit import</button>' +
+    '<span id="impProgress" class="muted"></span></div>' +
+    '<div id="impResult" class="mt8"></div>' +
+  '</div></div>';
+};
+
+ImportPage.wire = function (c) {
+  var s = ImportPage.state;
+
+  c.querySelectorAll('button[data-template]').forEach(function (b) {
+    b.onclick = function () {
+      var entity = b.getAttribute('data-template');
+      UI.busy(b, 'Building…', App.call('api_importTemplate', entity)).then(function (t) {
+        CSV.download(t.filename, t.csv);
+      }).catch(function (e) { UI.error(e.message); });
+    };
+  });
+
+  c.querySelector('#impEntity').onchange = function (e) {
+    s.entity = e.target.value || 'Assets';
+    ImportPage.reset(c);
+  };
+
+  c.querySelector('#impFile').onchange = function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { UI.error('That file is ' + Math.round(file.size / 1048576) + ' MB. The limit is 5 MB.'); return; }
+    if (!/\.csv$/i.test(file.name)) { UI.error('CSV files only.'); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var parsed = CSV.parse(reader.result);
+      if (!parsed.rows.length) { UI.error('No data rows found in ' + file.name + '.'); return; }
+      s.headers = parsed.headers;
+      s.rows = parsed.rows;
+      c.querySelector('#impFileInfo').textContent =
+        file.name + ' — ' + parsed.rows.length + ' rows, ' + parsed.headers.length + ' columns.';
+      ImportPage.validate(c);
+    };
+    reader.readAsText(file);
+  };
+
+  c.querySelector('#impErrorsOnly').onchange = function (e) {
+    s.errorsOnly = e.target.checked;
+    ImportPage.renderPreview(c);
+  };
+
+  c.querySelector('#impErrCsv').onclick = function () {
+    var bad = s.verdicts.filter(function (v) { return v.verdict === 'ERROR'; });
+    if (!bad.length) { UI.ok('No error rows.'); return; }
+    var headers = s.headers.concat(['_error']);
+    var rows = bad.map(function (v) {
+      return s.headers.map(function (h) { return s.rows[v.i][h]; }).concat([v.reason]);
+    });
+    CSV.download('import_errors_' + inputDate(new Date()) + '.csv', CSV.build(headers, rows));
+  };
+
+  c.querySelector('#impSkip').onchange = function () { ImportPage.updateCommitState(c); };
+  c.querySelector('#impCommit').onclick = function () { ImportPage.commit(c); };
+};
+
+ImportPage.reset = function (c) {
+  var s = ImportPage.state;
+  s.headers = []; s.rows = []; s.verdicts = [];
+  c.querySelector('#impFile').value = '';
+  c.querySelector('#impFileInfo').textContent = '';
+  c.querySelector('#impSummary').innerHTML = '';
+  c.querySelector('#impPreview').innerHTML = '';
+  c.querySelector('#impResult').innerHTML = '';
+  c.querySelector('#step3').classList.add('disabled');
+  c.querySelector('#step4').classList.add('disabled');
+};
+
+ImportPage.dupKeys = function () {
+  var s = ImportPage.state;
+  var col = s.matchColumn;
+  var seen = {}, dups = {};
+  s.rows.forEach(function (r) {
+    var k = String(r[col] || '').trim().toLowerCase();
+    if (!k) return;
+    if (seen[k]) dups[k] = true;
+    seen[k] = true;
+  });
+  return Object.keys(dups);
+};
+
+ImportPage.validate = function (c) {
+  var s = ImportPage.state;
+  c.querySelector('#step3').classList.remove('disabled');
+  c.querySelector('#impSummary').innerHTML = '<div class="loading">Validating…</div>';
+
+  App.call('api_importColumns', s.entity).then(function (meta) {
+    s.columns = meta.columns;
+    s.matchColumn = meta.matchColumn;
+
+    var known = s.headers.filter(function (h) { return s.columns.indexOf(h) >= 0; });
+    var unknown = s.headers.filter(function (h) { return s.columns.indexOf(h) < 0; });
+    if (!known.length) {
+      throw new Error('None of the columns in this file are recognised for ' + s.entity +
+        '. Expected: ' + s.columns.join(', '));
+    }
+    var dups = ImportPage.dupKeys();
+    var chunks = [];
+    for (var i = 0; i < s.rows.length; i += ImportPage.CHUNK) chunks.push(i);
+    s.verdicts = [];
+
+    var run = chunks.reduce(function (p, start) {
+      return p.then(function () {
+        return App.call('api_importValidate', {
+          entity: s.entity,
+          rows: s.rows.slice(start, start + ImportPage.CHUNK),
+          startIndex: start,
+          dupKeys: dups
+        }).then(function (res) {
+          s.verdicts = s.verdicts.concat(res.results);
+          c.querySelector('#impSummary').innerHTML =
+            '<div class="loading">Validating… ' + s.verdicts.length + ' of ' + s.rows.length + ' rows</div>';
+        });
+      });
+    }, Promise.resolve());
+
+    return run.then(function () {
+      if (unknown.length) {
+        UI.error('These columns are not part of the ' + s.entity + ' schema and will be ignored: ' + unknown.join(', '));
+      }
+      ImportPage.renderSummary(c);
+      ImportPage.renderPreview(c);
+      c.querySelector('#step4').classList.remove('disabled');
+      ImportPage.updateCommitState(c);
+    });
+  }).catch(function (e) { UI.error(e.message); c.querySelector('#impSummary').innerHTML = ''; });
+};
+
+ImportPage.counts = function () {
+  var s = ImportPage.state;
+  var out = { CREATE: 0, UPDATE: 0, ERROR: 0 };
+  s.verdicts.forEach(function (v) { out[v.verdict]++; });
+  return out;
+};
+
+ImportPage.renderSummary = function (c) {
+  var n = ImportPage.counts();
+  c.querySelector('#impSummary').innerHTML =
+    '<div class="summarybar">' + n.CREATE + ' to create · ' + n.UPDATE + ' to update · ' + n.ERROR + ' errors</div>';
+};
+
+ImportPage.renderPreview = function (c) {
+  var s = ImportPage.state;
+  var show = s.errorsOnly ? s.verdicts.filter(function (v) { return v.verdict === 'ERROR'; }) : s.verdicts;
+  var cols = s.headers.slice(0, 8);
+
+  var head = '<tr><th style="width:50px">Row</th><th style="width:80px">Verdict</th>' +
+    cols.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') + '<th>Detail</th></tr>';
+
+  var body = show.slice(0, 500).map(function (v) {
+    var r = s.rows[v.i] || {};
+    var detail = '';
+    if (v.verdict === 'ERROR') detail = '<span style="color:var(--red)">' + esc(v.reason) + '</span>';
+    else if (v.verdict === 'UPDATE') {
+      detail = esc(v.id) + (v.diff.length
+        ? '<div class="diffline">' + v.diff.map(function (d) {
+            return esc(d.field) + ': ' + esc(d.old || '(blank)') + ' → ' + esc(d.now || '(blank)');
+          }).join('<br>') + '</div>'
+        : '<div class="diffline">no changes</div>');
+    }
+    return '<tr class="v-' + v.verdict.toLowerCase() + '"><td>' + (v.i + 2) + '</td><td>' + v.verdict + '</td>' +
+      cols.map(function (h) { return '<td>' + esc(r[h] || '') + '</td>'; }).join('') +
+      '<td>' + detail + '</td></tr>';
+  }).join('');
+
+  c.querySelector('#impPreview').innerHTML =
+    '<div class="tablewrap"><table class="data"><thead>' + head + '</thead><tbody>' +
+    (body || '<tr><td colspan="' + (cols.length + 3) + '" class="muted">Nothing to show.</td></tr>') +
+    '</tbody></table></div>' +
+    (show.length > 500 ? '<p class="muted">Showing the first 500 of ' + show.length + ' rows.</p>' : '');
+};
+
+ImportPage.updateCommitState = function (c) {
+  var n = ImportPage.counts();
+  var skip = c.querySelector('#impSkip').checked;
+  var btn = c.querySelector('#impCommit');
+  btn.disabled = !ImportPage.state.verdicts.length || (n.ERROR > 0 && !skip);
+  btn.textContent = 'Commit import (' + n.CREATE + ' create, ' + n.UPDATE + ' update' +
+    (skip && n.ERROR ? ', ' + n.ERROR + ' skipped' : '') + ')';
+};
+
+ImportPage.commit = function (c) {
+  var s = ImportPage.state;
+  var skip = c.querySelector('#impSkip').checked;
+  var dups = ImportPage.dupKeys();
+  var btn = c.querySelector('#impCommit');
+  var prog = c.querySelector('#impProgress');
+  var totals = { created: 0, updated: 0, skipped: 0 };
+
+  // Only send rows that passed, unless the user opted to skip errors server-side.
+  var payloadRows = s.verdicts
+    .filter(function (v) { return skip || v.verdict !== 'ERROR'; })
+    .map(function (v) { return s.rows[v.i]; });
+
+  if (!payloadRows.length) { UI.error('Nothing to import.'); return; }
+
+  btn.disabled = true;
+  var chunks = [];
+  for (var i = 0; i < payloadRows.length; i += ImportPage.CHUNK) chunks.push(i);
+  var done = 0;
+
+  chunks.reduce(function (p, start) {
+    return p.then(function () {
+      return App.call('api_importCommit', {
+        entity: s.entity,
+        rows: payloadRows.slice(start, start + ImportPage.CHUNK),
+        skipErrors: skip,
+        dupKeys: dups
+      }).then(function (res) {
+        totals.created += res.created;
+        totals.updated += res.updated;
+        totals.skipped += res.skipped;
+        done += Math.min(ImportPage.CHUNK, payloadRows.length - start);
+        prog.textContent = done + ' of ' + payloadRows.length + ' rows committed…';
+      });
+    });
+  }, Promise.resolve()).then(function () {
+    prog.textContent = '';
+    btn.disabled = false;
+    App.invalidateAssets();
+    var link = s.entity === 'Assets'
+      ? ' <a href="#/assets">View assets</a>'
+      : ' <a href="#/masters/' + s.entity.toLowerCase() + '">View ' + esc(s.entity) + '</a>';
+    c.querySelector('#impResult').innerHTML =
+      '<div class="panel"><b>Import complete.</b> ' + totals.created + ' created, ' + totals.updated +
+      ' updated, ' + totals.skipped + ' skipped.' + link + '</div>';
+    UI.ok('Import complete: ' + totals.created + ' created, ' + totals.updated + ' updated.');
+  }).catch(function (e) {
+    btn.disabled = false;
+    prog.textContent = '';
+    UI.error('Import stopped: ' + e.message + ' (rows committed before the failure are saved).');
+  });
+};
+</script>

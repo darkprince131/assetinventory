@@ -1,0 +1,426 @@
+<script>
+/* ------------------------------------------------------------------ App core
+ * Router, shared client state, server bridge and the small UI helpers every
+ * page uses. Pages register themselves on App.pages.
+ */
+
+var App = {
+  pages: {},
+  state: {
+    user: window.BOOT_USER || {},
+    config: {},
+    employees: [],
+    locations: [],
+    vendors: [],
+    reports: [],
+    importEntities: [],
+    sheetUrl: '',
+    assets: null,          // loaded lazily, kept until a write invalidates it
+    ready: false,
+    mode: 'apps-script'    // 'local' when served as a static build
+  },
+
+  /**
+   * Transport seam. Null means "use google.script.run" — the Apps Script build.
+   * A static build (Netlify) installs its own function of (name, args) => Promise.
+   */
+  transport: null,
+
+  /** Promise wrapper around whichever transport is installed. */
+  call: function (fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    if (App.transport) return App.transport(fn, args);
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (err) { reject(new Error(err && err.message ? err.message : String(err))); })
+        [fn].apply(null, args);
+    });
+  },
+
+  start: function () {
+    document.getElementById('sheetLink').href = '#';
+    window.addEventListener('hashchange', function () { App.route(); });
+    App.call('api_bootstrap').then(function (boot) {
+      App.state.user = boot.user;
+      App.state.config = boot.config || {};
+      App.state.employees = boot.employees || [];
+      App.state.locations = boot.locations || [];
+      App.state.vendors = boot.vendors || [];
+      App.state.reports = boot.reports || [];
+      App.state.importEntities = boot.importEntities || [];
+      App.state.sheetUrl = boot.sheetUrl || '';
+      App.state.ready = true;
+      document.getElementById('whoName').textContent = boot.user.name || boot.user.email;
+      document.getElementById('whoRole').textContent = boot.user.role;
+      var link = document.getElementById('sheetLink');
+      // A static build has no sheet behind it — do not offer a dead link.
+      if (App.state.mode === 'local') link.style.display = 'none';
+      else link.href = boot.sheetUrl;
+      App.route();
+    }).catch(function (e) {
+      // The transport already rendered a sign-in screen; leave it alone.
+      if (e && e.needsAuth) return;
+      document.getElementById('content').className = '';
+      document.getElementById('content').innerHTML =
+        '<h1>Could not start</h1><p class="muted"></p>';
+      document.querySelector('#content p').textContent = e.message;
+    });
+  },
+
+  // ------------------------------------------------------------------ routing
+
+  parse: function () {
+    var h = location.hash || '#/';
+    var parts = h.replace(/^#\/?/, '').split('/').filter(function (s) { return s !== ''; });
+    if (!parts.length) return { page: 'dashboard', params: {} };
+    if (parts[0] === 'assets') {
+      return parts.length > 1
+        ? { page: 'assetDetail', params: { id: decodeURIComponent(parts[1]) } }
+        : { page: 'assets', params: App.queryParams() };
+    }
+    var map = { import: 'import', masters: 'masters', reports: 'reports', audit: 'audit' };
+    return { page: map[parts[0]] || 'dashboard', params: Object.assign(App.queryParams(), { tab: parts[1] || '' }) };
+  },
+
+  queryParams: function () {
+    var i = (location.hash || '').indexOf('?');
+    var out = {};
+    if (i < 0) return out;
+    (location.hash.slice(i + 1)).split('&').forEach(function (kv) {
+      if (!kv) return;
+      var p = kv.split('=');
+      out[decodeURIComponent(p[0])] = decodeURIComponent(p.slice(1).join('=') || '');
+    });
+    return out;
+  },
+
+  route: function () {
+    if (!App.state.ready) return;
+    var r = App.parse();
+    var page = App.pages[r.page] || App.pages.dashboard;
+    UI.clearBars();
+    document.querySelectorAll('#sidebar nav a').forEach(function (a) {
+      var name = a.getAttribute('data-nav');
+      var active = name === r.page || (r.page === 'assetDetail' && name === 'assets');
+      a.classList.toggle('active', active);
+    });
+    var c = document.getElementById('content');
+    c.className = '';
+    c.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      page.render(c, r.params || {});
+    } catch (e) {
+      UI.error(e.message);
+      c.innerHTML = '';
+    }
+  },
+
+  go: function (hash) { location.hash = hash; },
+
+  /** Assets, cached client-side. Filtering and sorting happen in the browser. */
+  loadAssets: function (force) {
+    if (App.state.assets && !force) return Promise.resolve(App.state.assets);
+    return App.call('api_getAssets', false).then(function (rows) {
+      App.state.assets = rows;
+      return rows;
+    });
+  },
+
+  invalidateAssets: function () { App.state.assets = null; },
+
+  can: function (role) {
+    var rank = { Viewer: 1, Editor: 2, Admin: 3 };
+    return (rank[App.state.user.role] || 0) >= rank[role];
+  },
+
+  cfg: function (key) { return App.state.config[key] || []; },
+
+  employee: function (id) {
+    return App.state.employees.filter(function (e) { return e.emp_id === id; })[0] || null;
+  },
+  location: function (id) {
+    return App.state.locations.filter(function (l) { return l.location_id === id; })[0] || null;
+  },
+  vendor: function (id) {
+    return App.state.vendors.filter(function (v) { return v.vendor_id === id; })[0] || null;
+  }
+};
+
+/* ------------------------------------------------------------------ helpers */
+
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function esc(v) {
+  if (v === null || v === undefined) return '';
+  return String(v).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+/** Server dates arrive as "YYYY-MM-DDTHH:mm:ss" (script-local wall clock). */
+function toDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  var m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) { var d = new Date(v); return isNaN(d.getTime()) ? null : d; }
+  return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+}
+
+function fmtDate(v) {
+  var d = toDate(v);
+  return d ? pad2(d.getDate()) + '-' + MONTHS[d.getMonth()] + '-' + d.getFullYear() : '';
+}
+
+function fmtDateTime(v) {
+  var d = toDate(v);
+  return d ? fmtDate(d) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) : '';
+}
+
+function inputDate(v) {
+  var d = toDate(v);
+  return d ? d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) : '';
+}
+
+function fmtMoney(v) {
+  if (v === '' || v === null || v === undefined || isNaN(Number(v))) return '';
+  return Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+
+function daysUntil(v) {
+  var d = toDate(v);
+  if (!d) return null;
+  var t = new Date(); t.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+  return Math.round((d - t) / 86400000);
+}
+
+function statusPill(status) {
+  var cls = String(status || '').toLowerCase().replace(/[^a-z]/g, '');
+  return '<span class="pill ' + cls + '">' + esc(status) + '</span>';
+}
+
+/** Green / amber / red dot with days remaining, for warranty and AMC. */
+function expiryDot(dateVal) {
+  if (!dateVal) return '<span class="muted">—</span>';
+  var d = daysUntil(dateVal);
+  var cls = d < 0 ? 'bad' : (d <= 30 ? 'warn' : 'ok');
+  var text = d < 0 ? Math.abs(d) + 'd ago' : d + 'd left';
+  return '<span class="dot ' + cls + '"></span>' + fmtDate(dateVal) + ' <span class="muted">(' + text + ')</span>';
+}
+
+function byText(a, b) { return String(a).localeCompare(String(b)); }
+
+/* ----------------------------------------------------------------------- UI */
+
+var UI = {
+  error: function (msg) {
+    var b = document.getElementById('errbar');
+    b.textContent = msg;
+    var x = document.createElement('button');
+    x.className = 'small';
+    x.textContent = 'Dismiss';
+    x.onclick = function () { b.className = ''; };
+    b.appendChild(x);
+    b.className = 'show';
+    window.scrollTo(0, 0);
+  },
+  ok: function (msg) {
+    var b = document.getElementById('okbar');
+    b.textContent = msg;
+    b.className = 'show';
+    setTimeout(function () { b.className = ''; }, 6000);
+  },
+  clearBars: function () {
+    document.getElementById('errbar').className = '';
+    document.getElementById('okbar').className = '';
+  },
+
+  /** Disables a button and shows "Saving…" while a promise runs. */
+  busy: function (btn, label, promise) {
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = label || 'Saving…';
+    return promise.then(function (r) {
+      btn.disabled = false; btn.textContent = old; return r;
+    }, function (e) {
+      btn.disabled = false; btn.textContent = old; throw e;
+    });
+  },
+
+  /**
+   * opts: { title, body (html string), wide, buttons: [{label, primary, danger,
+   * busyLabel, onClick(ctx)}], onOpen(root) }
+   * ctx = { root, close(), error(msg), button }
+   */
+  modal: function (opts) {
+    var back = document.createElement('div');
+    back.className = 'modal-back';
+    back.innerHTML =
+      '<div class="modal' + (opts.wide ? ' wide' : '') + '">' +
+        '<header>' + esc(opts.title) + '</header>' +
+        '<div class="body"><div class="err"></div><div class="content"></div></div>' +
+        '<footer></footer>' +
+      '</div>';
+    var content = back.querySelector('.content');
+    content.innerHTML = opts.body || '';
+    var errBox = back.querySelector('.err');
+    var footer = back.querySelector('footer');
+
+    function close() { document.body.removeChild(back); }
+    function showError(msg) { errBox.textContent = msg; errBox.className = 'err show'; back.querySelector('.body').scrollTop = 0; }
+
+    var ctx = { root: content, close: close, error: showError };
+
+    (opts.buttons || []).concat([{ label: 'Cancel', cancel: true }]).forEach(function (b) {
+      var btn = document.createElement('button');
+      btn.textContent = b.label;
+      if (b.primary) btn.className = 'primary';
+      if (b.danger) btn.className = 'danger';
+      btn.onclick = function () {
+        if (b.cancel) return close();
+        errBox.className = 'err';
+        var res;
+        try { res = b.onClick(Object.assign({ button: btn }, ctx)); }
+        catch (e) { return showError(e.message); }
+        if (res && res.then) {
+          UI.busy(btn, b.busyLabel || 'Saving…', res).catch(function (e) { showError(e.message); });
+        }
+      };
+      footer.appendChild(btn);
+    });
+
+    back.addEventListener('mousedown', function (e) { if (e.target === back) close(); });
+    document.body.appendChild(back);
+    if (opts.onOpen) opts.onOpen(content, ctx);
+    var first = content.querySelector('input, select, textarea');
+    if (first) first.focus();
+    return ctx;
+  },
+
+  /** Confirmation dialog. `message` should name the specific asset. */
+  confirm: function (title, message, onYes, yesLabel) {
+    return UI.modal({
+      title: title,
+      body: '<p>' + esc(message) + '</p>',
+      buttons: [{ label: yesLabel || 'Confirm', primary: true, onClick: function (ctx) {
+        var r = onYes(ctx);
+        if (r && r.then) return r.then(function () { ctx.close(); });
+        ctx.close();
+      } }]
+    });
+  },
+
+  /** <select> from a list of values or {value,label} objects. */
+  select: function (name, values, selected, opts) {
+    opts = opts || {};
+    var html = '<select id="' + name + '"' + (opts.multiple ? ' multiple size="' + (opts.size || 5) + '"' : '') + '>';
+    if (!opts.multiple) html += '<option value="">' + esc(opts.blank || '—') + '</option>';
+    values.forEach(function (v) {
+      var val = (v && typeof v === 'object') ? v.value : v;
+      var lab = (v && typeof v === 'object') ? v.label : v;
+      var sel = Array.isArray(selected) ? selected.indexOf(val) >= 0 : String(selected || '') === String(val);
+      html += '<option value="' + esc(val) + '"' + (sel ? ' selected' : '') + '>' + esc(lab) + '</option>';
+    });
+    return html + '</select>';
+  },
+
+  field: function (label, inner, required) {
+    return '<label class="f' + (required ? ' req' : '') + '"><span>' + esc(label) + '</span>' + inner + '</label>';
+  },
+
+  text: function (name, value, attrs) {
+    return '<input id="' + name + '" value="' + esc(value === undefined || value === null ? '' : value) + '" ' + (attrs || '') + '>';
+  },
+
+  date: function (name, value) {
+    return '<input type="date" id="' + name + '" value="' + esc(inputDate(value)) + '">';
+  },
+
+  employeeOptions: function (includeExited) {
+    return App.state.employees
+      .filter(function (e) { return includeExited || e.status !== 'Exited'; })
+      .map(function (e) { return { value: e.emp_id, label: e.full_name + ' · ' + e.email + (e.status === 'Exited' ? ' (exited)' : '') }; })
+      .sort(function (a, b) { return byText(a.label, b.label); });
+  },
+
+  locationOptions: function () {
+    return App.state.locations
+      .filter(function (l) { return l.active !== false; })
+      .map(function (l) { return { value: l.location_id, label: l.name }; })
+      .sort(function (a, b) { return byText(a.label, b.label); });
+  },
+
+  vendorOptions: function () {
+    return App.state.vendors
+      .filter(function (v) { return v.active !== false; })
+      .map(function (v) { return { value: v.vendor_id, label: v.name }; })
+      .sort(function (a, b) { return byText(a.label, b.label); });
+  }
+};
+
+/* ---------------------------------------------------------------------- CSV */
+
+var CSV = {
+  cell: function (v) {
+    var s = (v === null || v === undefined) ? '' : String(v);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  },
+
+  build: function (headers, rows) {
+    var out = [headers.map(CSV.cell).join(',')];
+    rows.forEach(function (r) { out.push(r.map(CSV.cell).join(',')); });
+    return out.join('\r\n');
+  },
+
+  download: function (filename, text) {
+    var blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8;' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.target = '_self';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
+  },
+
+  /** Minimal RFC4180 parser. Skips blank lines and '#' comment lines. */
+  parse: function (text) {
+    text = String(text).replace(/^﻿/, '');
+    var rows = [], row = [], field = '', i = 0, inQuotes = false;
+    while (i < text.length) {
+      var c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+          inQuotes = false; i++; continue;
+        }
+        field += c; i++; continue;
+      }
+      if (c === '"') { inQuotes = true; i++; continue; }
+      if (c === ',') { row.push(field); field = ''; i++; continue; }
+      if (c === '\r') { i++; continue; }
+      if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+      field += c; i++;
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+
+    var clean = rows.filter(function (r) {
+      if (!r.length) return false;
+      if (r.length === 1 && String(r[0]).trim() === '') return false;
+      return String(r[0]).trim().indexOf('#') !== 0;
+    });
+    if (!clean.length) return { headers: [], rows: [] };
+
+    var headers = clean[0].map(function (h) { return String(h).trim(); });
+    var objs = clean.slice(1).map(function (r) {
+      var o = {};
+      headers.forEach(function (h, n) { o[h] = r[n] === undefined ? '' : String(r[n]).trim(); });
+      return o;
+    });
+    return { headers: headers, rows: objs };
+  }
+};
+</script>

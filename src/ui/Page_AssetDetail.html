@@ -1,0 +1,330 @@
+<script>
+/* ------------------------------------------------------------- Asset detail
+ * Header + conditional actions, then Details / History / Audit tabs.
+ */
+
+App.pages.assetDetail = {
+  render: function (c, params) {
+    App.call('api_getAsset', params.id).then(function (d) {
+      Detail.data = d;
+      c.innerHTML = Detail.html(d);
+      Detail.wire(c, d);
+    }).catch(function (e) { UI.error(e.message); c.innerHTML = '<p><a href="#/assets">← Back to assets</a></p>'; });
+  }
+};
+
+var Detail = {
+  data: null,
+  tab: 'details',
+
+  html: function (d) {
+    var a = d.asset;
+    var actions = [];
+    if (App.can('Editor')) {
+      if (a.status === 'In Stock') actions.push(btn('act_assign', 'Assign'));
+      if (a.status === 'Assigned') actions.push(btn('act_return', 'Return'));
+      if (a.status === 'Assigned') actions.push(btn('act_transfer', 'Transfer'));
+      if (['In Stock', 'Assigned', 'In Repair'].indexOf(a.status) >= 0) {
+        actions.push(d.openMaintenance ? btn('act_closemnt', 'Close maintenance') : btn('act_maint', 'Log maintenance'));
+      }
+      actions.push(btn('act_edit', 'Edit'));
+      if (a.status !== 'Retired') actions.push(btn('act_retire', 'Retire', 'danger'));
+    }
+
+    return '' +
+    '<p><a href="#/assets">← Assets</a></p>' +
+    '<div class="pagehead"><div>' +
+      '<h1>' + esc(a.asset_id) + ' · ' + esc([a.make, a.model].filter(Boolean).join(' ')) + '</h1>' +
+      '<p class="sub">' + statusPill(a.status) + ' &nbsp; ' + esc(a.category) +
+        (a.subcategory ? ' · ' + esc(a.subcategory) : '') +
+        (a.serial_number ? ' · <span class="mono">' + esc(a.serial_number) + '</span>' : '') + '</p>' +
+    '</div><div class="actions">' + actions.join('') + '</div></div>' +
+
+    '<div class="tabs">' +
+      '<button data-tab="details" class="' + (Detail.tab === 'details' ? 'active' : '') + '">Details</button>' +
+      '<button data-tab="history" class="' + (Detail.tab === 'history' ? 'active' : '') + '">History</button>' +
+      '<button data-tab="audit" class="' + (Detail.tab === 'audit' ? 'active' : '') + '">Audit</button>' +
+    '</div><div id="tabBody"></div>';
+
+    function btn(id, label, cls) {
+      return '<button id="' + id + '"' + (cls ? ' class="' + cls + '"' : '') + '>' + esc(label) + '</button>';
+    }
+  },
+
+  wire: function (c, d) {
+    c.querySelectorAll('.tabs button').forEach(function (b) {
+      b.onclick = function () {
+        Detail.tab = b.getAttribute('data-tab');
+        c.querySelectorAll('.tabs button').forEach(function (x) { x.classList.toggle('active', x === b); });
+        Detail.renderTab(c, d);
+      };
+    });
+    Detail.renderTab(c, d);
+
+    var a = d.asset;
+    var reload = function () { App.invalidateAssets(); App.route(); };
+
+    bind('act_edit', function () { AssetForm.open(a, reload); });
+    bind('act_assign', function () { Detail.assignModal(a, reload); });
+    bind('act_return', function () { Detail.returnModal(a, reload); });
+    bind('act_transfer', function () { Detail.transferModal(a, reload); });
+    bind('act_maint', function () { Detail.maintModal(a, reload); });
+    bind('act_closemnt', function () { Detail.closeMaintModal(a, d, reload); });
+    bind('act_retire', function () { Detail.retireModal(a, reload); });
+
+    function bind(id, fn) { var el = c.querySelector('#' + id); if (el) el.onclick = fn; }
+  },
+
+  renderTab: function (c, d) {
+    var body = c.querySelector('#tabBody');
+    if (Detail.tab === 'details') body.innerHTML = Detail.detailsHtml(d);
+    else if (Detail.tab === 'history') body.innerHTML = Detail.historyHtml(d);
+    else body.innerHTML = Detail.auditHtml(d);
+  },
+
+  detailsHtml: function (d) {
+    var a = d.asset;
+    function defs(title, pairs) {
+      var rows = pairs.filter(function (p) { return p[1] !== false; })
+        .map(function (p) {
+          var v = p[2] === 'html' ? p[1] : esc(p[1]);
+          return '<dt>' + esc(p[0]) + '</dt><dd>' + (v === '' || v === null || v === undefined ? '<span class="muted">—</span>' : v) + '</dd>';
+        }).join('');
+      return '<div class="panel"><h2>' + esc(title) + '</h2><dl class="defs">' + rows + '</dl></div>';
+    }
+
+    var emp = a.assigned_to_emp_id ? App.employee(a.assigned_to_emp_id) : null;
+
+    return '<div class="grid2">' +
+      '<div>' +
+        defs('Identification', [
+          ['Asset ID', a.asset_id], ['Asset tag', a.asset_tag], ['Category', a.category],
+          ['Subcategory', a.subcategory], ['Make', a.make], ['Model', a.model],
+          ['Serial number', a.serial_number], ['Specs', a.specs],
+          ['Status', statusPill(a.status), 'html'], ['Condition', a.condition], ['Ownership', a.ownership]
+        ]) +
+        defs('Assignment', [
+          ['Assigned to', a.assigned_to_name ? esc(a.assigned_to_name) + (a.employee_status === 'Exited' ? ' <span class="pill retired">exited</span>' : '') : '', 'html'],
+          ['Email', a.assigned_to_email], ['Department', emp ? emp.department : ''],
+          ['Assigned on', fmtDate(a.assigned_on)], ['Location', a.location_name]
+        ]) +
+        defs('Notes', [['Notes', (a.notes || '').replace(/\n/g, '<br>'), 'html']]) +
+      '</div>' +
+      '<div>' +
+        defs('Purchase & vendor', [
+          ['Purchase date', fmtDate(a.purchase_date)],
+          ['Purchase cost', a.purchase_cost === '' ? '' : (a.currency || 'INR') + ' ' + fmtMoney(a.purchase_cost)],
+          ['PO number', a.po_number], ['Invoice number', a.invoice_number], ['Bought from', a.vendor_name]
+        ]) +
+        defs('Warranty & AMC', [
+          ['Warranty start', fmtDate(a.warranty_start)],
+          ['Warranty end', a.warranty_end ? expiryDot(a.warranty_end) : '', 'html'],
+          ['AMC vendor', a.amc_vendor_name],
+          ['AMC start', fmtDate(a.amc_start)],
+          ['AMC end', a.amc_end ? expiryDot(a.amc_end) : '', 'html']
+        ]) +
+        (a.ownership !== 'Owned' ? defs('Rental', [
+          ['Rental vendor', a.rental_vendor_name],
+          ['Rental start', fmtDate(a.rental_start)],
+          ['Rental end', a.rental_end ? expiryDot(a.rental_end) : '', 'html']
+        ]) : '') +
+        defs('Record', [
+          ['Created', fmtDateTime(a.created_at) + (a.created_by ? ' by ' + a.created_by : '')],
+          ['Last updated', fmtDateTime(a.updated_at) + (a.updated_by ? ' by ' + a.updated_by : '')]
+        ]) +
+      '</div>' +
+    '</div>';
+  },
+
+  historyHtml: function (d) {
+    var items = [];
+    d.assignments.forEach(function (r) {
+      var who = r.employee_name || r.emp_id || '';
+      var text = r.action + (who ? ' — ' + who : '') +
+        (r.to_location_name ? ' @ ' + r.to_location_name : '') +
+        (r.condition_out ? ' · out: ' + r.condition_out : '') +
+        (r.condition_in ? ' · in: ' + r.condition_in : '') +
+        (r.remarks ? ' · ' + r.remarks : '');
+      items.push({ when: r.action === 'Return' ? (r.returned_on || r.created_at) : (r.assigned_on || r.created_at),
+        kind: 'Assignment', id: r.assignment_id, text: text, by: r.created_by });
+    });
+    d.maintenance.forEach(function (r) {
+      var text = r.type + ' · ' + r.status + (r.issue ? ' — ' + r.issue : '') +
+        (r.vendor_name ? ' · ' + r.vendor_name : '') +
+        (r.resolution ? ' · ' + r.resolution : '') +
+        (r.cost !== '' && r.cost !== null && r.cost !== undefined ? ' · ₹' + fmtMoney(r.cost) : '') +
+        (r.returned_on ? ' · back ' + fmtDate(r.returned_on) : '');
+      items.push({ when: r.reported_on || r.created_at, kind: 'Maintenance', id: r.maintenance_id, text: text, by: r.reported_by });
+    });
+    items.sort(function (a, b) { return (toDate(b.when) || 0) - (toDate(a.when) || 0); });
+
+    if (!items.length) return '<div class="panel"><p class="muted">No assignment or maintenance history yet.</p></div>';
+    return '<div class="tablewrap"><table class="data"><thead><tr>' +
+      '<th style="width:110px">Date</th><th style="width:100px">Type</th><th style="width:100px">Record</th><th>What happened</th><th style="width:180px">By</th>' +
+      '</tr></thead><tbody>' + items.map(function (i) {
+        return '<tr><td class="nowrap">' + fmtDate(i.when) + '</td><td>' + esc(i.kind) + '</td>' +
+          '<td class="mono">' + esc(i.id) + '</td><td>' + esc(i.text) + '</td><td class="muted">' + esc(i.by || '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  },
+
+  auditHtml: function (d) {
+    if (!d.audit.length) return '<div class="panel"><p class="muted">No audit entries for this asset.</p></div>';
+    return '<div class="tablewrap"><table class="data"><thead><tr>' +
+      '<th style="width:140px">When</th><th style="width:170px">User</th><th style="width:90px">Action</th>' +
+      '<th style="width:150px">Field</th><th>Old</th><th>New</th><th style="width:90px">Source</th>' +
+      '</tr></thead><tbody>' + d.audit.map(function (r) {
+        return '<tr><td class="nowrap">' + fmtDateTime(r.timestamp) + '</td><td>' + esc(r.user_email) + '</td>' +
+          '<td>' + esc(r.action) + '</td><td>' + esc(r.field) + '</td>' +
+          '<td>' + esc(r.old_value) + '</td><td>' + esc(r.new_value) + '</td><td>' + esc(r.source) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  },
+
+  /* ------------------------------------------------------------- actions */
+
+  assignModal: function (a, done) {
+    UI.modal({
+      title: 'Assign ' + a.asset_id,
+      body: '<p class="muted">' + esc([a.make, a.model].filter(Boolean).join(' ')) + '</p>' +
+        UI.field('Employee', UI.select('m_emp', UI.employeeOptions(false), ''), true) +
+        UI.field('Location', UI.select('m_loc', UI.locationOptions(), a.location_id), true) +
+        UI.field('Condition handed over', UI.select('m_cond', App.cfg('condition'), a.condition)) +
+        UI.field('Assigned on', UI.date('m_on', new Date())) +
+        '<label class="row" style="gap:6px"><input type="checkbox" id="m_ack" style="width:auto"> Employee has confirmed receipt</label>' +
+        UI.field('Remarks', UI.text('m_remarks', '')),
+      buttons: [{ label: 'Assign', primary: true, onClick: function (ctx) {
+        var emp = ctx.root.querySelector('#m_emp').value;
+        if (!emp) throw new Error('Pick an employee.');
+        return App.call('api_assign', {
+          asset_id: a.asset_id, emp_id: emp,
+          location_id: ctx.root.querySelector('#m_loc').value,
+          condition_out: ctx.root.querySelector('#m_cond').value,
+          assigned_on: ctx.root.querySelector('#m_on').value,
+          acknowledged: ctx.root.querySelector('#m_ack').checked,
+          remarks: ctx.root.querySelector('#m_remarks').value
+        }).then(function () { ctx.close(); UI.ok('Assigned ' + a.asset_id); done(); });
+      } }]
+    });
+  },
+
+  returnModal: function (a, done) {
+    UI.modal({
+      title: 'Return ' + a.asset_id,
+      body: '<p>Return <b>' + esc(a.asset_id) + ' · ' + esc([a.make, a.model].filter(Boolean).join(' ')) +
+        '</b> from ' + esc(a.assigned_to_name || 'the current holder') + '?</p>' +
+        UI.field('Condition on return', UI.select('m_cond', App.cfg('condition'), a.condition)) +
+        UI.field('Returned on', UI.date('m_on', new Date())) +
+        UI.field('Return to location', UI.select('m_loc', UI.locationOptions(), a.location_id)) +
+        UI.field('Remarks', UI.text('m_remarks', '')),
+      buttons: [{ label: 'Return to stock', primary: true, onClick: function (ctx) {
+        return App.call('api_return', {
+          asset_id: a.asset_id,
+          condition_in: ctx.root.querySelector('#m_cond').value,
+          returned_on: ctx.root.querySelector('#m_on').value,
+          location_id: ctx.root.querySelector('#m_loc').value,
+          remarks: ctx.root.querySelector('#m_remarks').value
+        }).then(function () { ctx.close(); UI.ok(a.asset_id + ' returned to stock.'); done(); });
+      } }]
+    });
+  },
+
+  transferModal: function (a, done) {
+    UI.modal({
+      title: 'Transfer ' + a.asset_id,
+      body: '<p class="muted">Writes a Return and an Assign in one step. Currently with ' +
+        esc(a.assigned_to_name || '—') + ' at ' + esc(a.location_name || '—') + '.</p>' +
+        UI.field('New employee', UI.select('m_emp', UI.employeeOptions(false), a.assigned_to_emp_id), true) +
+        UI.field('New location', UI.select('m_loc', UI.locationOptions(), a.location_id), true) +
+        UI.field('Condition returned', UI.select('m_condin', App.cfg('condition'), a.condition)) +
+        UI.field('Condition handed over', UI.select('m_condout', App.cfg('condition'), a.condition)) +
+        UI.field('Remarks', UI.text('m_remarks', '')),
+      buttons: [{ label: 'Transfer', primary: true, onClick: function (ctx) {
+        return App.call('api_transfer', {
+          asset_id: a.asset_id,
+          emp_id: ctx.root.querySelector('#m_emp').value,
+          location_id: ctx.root.querySelector('#m_loc').value,
+          condition_in: ctx.root.querySelector('#m_condin').value,
+          condition_out: ctx.root.querySelector('#m_condout').value,
+          remarks: ctx.root.querySelector('#m_remarks').value
+        }).then(function () { ctx.close(); UI.ok(a.asset_id + ' transferred.'); done(); });
+      } }]
+    });
+  },
+
+  maintModal: function (a, done) {
+    UI.modal({
+      title: 'Log maintenance — ' + a.asset_id,
+      body: '<p class="muted">This puts ' + esc(a.asset_id) + ' into In Repair until the record is closed.</p>' +
+        '<div class="grid2">' +
+        UI.field('Type', UI.select('m_type', App.cfg('maintenance_type'), 'Repair'), true) +
+        UI.field('Status', UI.select('m_status', App.cfg('maintenance_status'), 'Open'), true) +
+        UI.field('Reported on', UI.date('m_reported', new Date())) +
+        UI.field('Sent on', UI.date('m_sent', '')) +
+        UI.field('Vendor', UI.select('m_vendor', UI.vendorOptions(), a.amc_vendor_id || '')) +
+        UI.field('Estimated cost', UI.text('m_cost', '')) +
+        '</div>' +
+        UI.field('Issue', '<textarea id="m_issue"></textarea>', true) +
+        '<label class="row" style="gap:6px"><input type="checkbox" id="m_warranty" style="width:auto"' +
+        (daysUntil(a.warranty_end) !== null && daysUntil(a.warranty_end) >= 0 ? ' checked' : '') + '> Covered under warranty</label>',
+      buttons: [{ label: 'Log and set In Repair', primary: true, onClick: function (ctx) {
+        var issue = ctx.root.querySelector('#m_issue').value;
+        if (!issue.trim()) throw new Error('Describe the issue.');
+        return App.call('api_openMaintenance', {
+          asset_id: a.asset_id,
+          type: ctx.root.querySelector('#m_type').value,
+          status: ctx.root.querySelector('#m_status').value,
+          reported_on: ctx.root.querySelector('#m_reported').value,
+          sent_on: ctx.root.querySelector('#m_sent').value,
+          vendor_id: ctx.root.querySelector('#m_vendor').value,
+          cost: ctx.root.querySelector('#m_cost').value,
+          under_warranty: ctx.root.querySelector('#m_warranty').checked,
+          issue: issue
+        }).then(function () { ctx.close(); UI.ok(a.asset_id + ' is now In Repair.'); done(); });
+      } }]
+    });
+  },
+
+  closeMaintModal: function (a, d, done) {
+    var m = d.openMaintenance;
+    var restoreDefault = d.previousStatus === 'Assigned' && a.assigned_to_emp_id ? 'Assigned' : 'In Stock';
+    UI.modal({
+      title: 'Close ' + m.maintenance_id + ' — ' + a.asset_id,
+      body: '<p class="muted">' + esc(m.type) + ' reported ' + fmtDate(m.reported_on) + ': ' + esc(m.issue) + '</p>' +
+        '<div class="grid2">' +
+        UI.field('Outcome', UI.select('m_status', ['Closed', 'Cancelled'], 'Closed'), true) +
+        UI.field('Returned on', UI.date('m_returned', new Date())) +
+        UI.field('Actual cost', UI.text('m_cost', m.cost)) +
+        UI.field('Condition now', UI.select('m_cond', App.cfg('condition'), a.condition)) +
+        '</div>' +
+        UI.field('Resolution', '<textarea id="m_res"></textarea>', true) +
+        UI.field('Restore status to', UI.select('m_restore', ['Assigned', 'In Stock', 'Retired'], restoreDefault), true),
+      buttons: [{ label: 'Close record', primary: true, onClick: function (ctx) {
+        return App.call('api_closeMaintenance', {
+          maintenance_id: m.maintenance_id,
+          status: ctx.root.querySelector('#m_status').value,
+          returned_on: ctx.root.querySelector('#m_returned').value,
+          cost: ctx.root.querySelector('#m_cost').value,
+          condition: ctx.root.querySelector('#m_cond').value,
+          resolution: ctx.root.querySelector('#m_res').value,
+          restore_status: ctx.root.querySelector('#m_restore').value
+        }).then(function () { ctx.close(); UI.ok(m.maintenance_id + ' closed.'); done(); });
+      } }]
+    });
+  },
+
+  retireModal: function (a, done) {
+    UI.modal({
+      title: 'Retire ' + a.asset_id,
+      body: '<p>Retire <b>' + esc(a.asset_id) + ' · ' + esc([a.make, a.model].filter(Boolean).join(' ')) + '</b>' +
+        (a.assigned_to_name ? ', currently with <b>' + esc(a.assigned_to_name) + '</b> (the assignment will be closed)' : '') +
+        '? The row stays in the sheet with status Retired.</p>' +
+        UI.field('Reason', '<textarea id="m_reason"></textarea>', true),
+      buttons: [{ label: 'Retire asset', danger: true, onClick: function (ctx) {
+        var reason = ctx.root.querySelector('#m_reason').value;
+        if (!reason.trim()) throw new Error('A reason is required.');
+        return App.call('api_retire', { asset_id: a.asset_id, reason: reason })
+          .then(function () { ctx.close(); UI.ok(a.asset_id + ' retired.'); done(); });
+      } }]
+    });
+  }
+};
+</script>

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <title>Asset Tracker</title>
+    <?!= include('ui/Styles'); ?>
+  </head>
+  <body>
+    <? if (NO_ACCESS) { ?>
+      <div class="noaccess">
+        <h1>No access — contact your IT admin</h1>
+        <p class="muted">You are signed in as</p>
+        <p class="mono"><?= USER.email || '(unknown account)' ?></p>
+        <p class="muted">Ask an administrator to add this address to the <b>Users</b> tab of the
+        Asset Tracker sheet with a role of Viewer, Editor or Admin.</p>
+      </div>
+    <? } else { ?>
+      <div id="app">
+        <div id="sidebar">
+          <div class="brand">Asset Tracker<small>IT &amp; non-IT asset register</small></div>
+          <nav>
+            <a href="#/" data-nav="dashboard">Dashboard</a>
+            <a href="#/assets" data-nav="assets">Assets</a>
+            <a href="#/import" data-nav="import">Import</a>
+            <a href="#/masters" data-nav="masters">Masters</a>
+            <a href="#/reports" data-nav="reports">Reports</a>
+            <a href="#/audit" data-nav="audit">Audit</a>
+          </nav>
+          <div class="who">
+            <span id="whoName"></span><br>
+            <span id="whoRole" class="muted"></span><br>
+            <a id="sheetLink" href="#" target="_blank" rel="noopener">Open the sheet</a>
+          </div>
+        </div>
+        <div id="main">
+          <div id="errbar"></div>
+          <div id="okbar"></div>
+          <div id="content" class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <script>
+        window.BOOT_USER = <?!= JSON.stringify(USER) ?>;
+      </script>
+
+      <?!= include('ui/App.js'); ?>
+      <?!= include('ui/Page_Dashboard'); ?>
+      <?!= include('ui/Page_Assets'); ?>
+      <?!= include('ui/Page_AssetDetail'); ?>
+      <?!= include('ui/Page_Import'); ?>
+      <?!= include('ui/Page_Masters'); ?>
+      <?!= include('ui/Page_Audit'); ?>
+
+      <script>App.start();</script>
+    <? } ?>
+  </body>
+</html>

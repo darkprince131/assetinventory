@@ -1,0 +1,451 @@
+<script>
+/* --------------------------------------------------------------- Assets list
+ * Dense table. Everything after the initial load is client-side: search,
+ * filters, sort, pagination.
+ */
+
+var AssetsPage = {
+  COLS: [
+    { key: 'asset_id', label: 'Asset ID', def: true, link: true },
+    { key: 'asset_tag', label: 'Tag', def: false },
+    { key: 'category', label: 'Category', def: true },
+    { key: 'make_model', label: 'Make / Model', def: true, value: function (a) { return [a.make, a.model].filter(Boolean).join(' '); } },
+    { key: 'serial_number', label: 'Serial', def: true },
+    { key: 'status', label: 'Status', def: true, html: function (a) { return statusPill(a.status); } },
+    { key: 'condition', label: 'Condition', def: false },
+    { key: 'ownership', label: 'Ownership', def: false },
+    { key: 'assigned_to_name', label: 'Assigned to', def: true, html: function (a) {
+        if (!a.assigned_to_name) return '<span class="muted">—</span>';
+        return esc(a.assigned_to_name) + (a.employee_status === 'Exited' ? ' <span class="pill retired">exited</span>' : '');
+      } },
+    { key: 'department', label: 'Department', def: false },
+    { key: 'location_name', label: 'Location', def: true },
+    { key: 'purchase_cost', label: 'Cost', def: false, num: true, html: function (a) { return fmtMoney(a.purchase_cost); } },
+    { key: 'warranty_end', label: 'Warranty end', def: true, date: true, html: function (a) { return expiryDot(a.warranty_end); } },
+    { key: 'amc_end', label: 'AMC end', def: false, date: true, html: function (a) { return a.amc_end ? expiryDot(a.amc_end) : '<span class="muted">—</span>'; } }
+  ],
+
+  PER_PAGE: 50,
+
+  state: { search: '', filters: {}, sort: { key: 'asset_id', dir: 1 }, page: 1, rows: [], filtered: [] },
+
+  visibleCols: function () {
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem('at_cols') || 'null'); } catch (e) { saved = null; }
+    if (!saved) return AssetsPage.COLS.filter(function (c) { return c.def; }).map(function (c) { return c.key; });
+    return saved;
+  },
+
+  setVisibleCols: function (keys) {
+    try { localStorage.setItem('at_cols', JSON.stringify(keys)); } catch (e) { /* ignore */ }
+  },
+
+  value: function (col, a) {
+    if (col.value) return col.value(a);
+    return a[col.key];
+  }
+};
+
+App.pages.assets = {
+  render: function (c, params) {
+    var s = AssetsPage.state;
+    s.filters = {};
+    ['category', 'status', 'location', 'ownership', 'department', 'warranty'].forEach(function (f) {
+      if (params[f]) s.filters[f] = String(params[f]).split(',').filter(Boolean);
+    });
+    s.search = params.q || '';
+    s.page = 1;
+
+    var wantsRetired = (s.filters.status || []).indexOf('Retired') >= 0 ||
+                       (s.filters.status || []).indexOf('Lost') >= 0;
+
+    (wantsRetired ? App.call('api_getAssets', true) : App.loadAssets())
+      .then(function (rows) {
+        s.rows = rows;
+        c.innerHTML = AssetsPage.shell();
+        AssetsPage.wire(c);
+        AssetsPage.apply(c);
+      }).catch(function (e) { UI.error(e.message); c.innerHTML = ''; });
+  }
+};
+
+AssetsPage.shell = function () {
+  var s = AssetsPage.state;
+  var cats = App.cfg('category');
+  var statuses = App.cfg('status');
+  var owns = App.cfg('ownership');
+  var depts = App.cfg('department');
+  var locs = UI.locationOptions();
+
+  return '' +
+  '<div class="pagehead"><div><h1>Assets</h1><p class="sub" id="assetCount"></p></div>' +
+  '<div class="actions">' +
+    (App.can('Editor') ? '<button class="primary" id="btnAdd">+ Add Asset</button>' : '') +
+    (App.can('Editor') ? '<button id="btnImport">Bulk Import</button>' : '') +
+    '<button id="btnExport">Export CSV</button>' +
+    '<button id="btnCols">Columns</button>' +
+    '<button id="btnRefresh">Refresh</button>' +
+  '</div></div>' +
+
+  '<div class="panel mb8">' +
+    '<div class="row mb8">' +
+      '<input id="assetSearch" placeholder="Search id, tag, serial, make, model, assignee…" style="max-width:420px" value="' + esc(s.search) + '">' +
+      '<span class="spacer"></span>' +
+      '<button class="small" id="btnClearFilters">Clear all filters</button>' +
+    '</div>' +
+    '<div class="grid3" style="grid-template-columns:repeat(6,1fr)">' +
+      facet('category', 'Category', cats) +
+      facet('status', 'Status', statuses) +
+      facet('location', 'Location', locs) +
+      facet('ownership', 'Ownership', owns) +
+      facet('department', 'Department', depts) +
+      facet('warranty', 'Warranty', ['Active', 'Expiring 90d', 'Expired', 'None']) +
+    '</div>' +
+    '<div class="row mt8" id="chips"></div>' +
+  '</div>' +
+
+  '<div class="tablewrap"><table class="data" id="assetTable"><thead></thead><tbody></tbody></table></div>' +
+  '<div class="row mt8"><span id="pageInfo" class="muted"></span><span class="spacer"></span>' +
+  '<button class="small" id="prevPage">Previous</button><button class="small" id="nextPage">Next</button></div>';
+
+  function facet(name, label, values) {
+    var sel = s.filters[name] || [];
+    return '<div><div class="muted" style="font-size:11px">' + esc(label) + '</div>' +
+      UI.select('f_' + name, values, sel, { multiple: true, size: 4 }) + '</div>';
+  }
+};
+
+AssetsPage.wire = function (c) {
+  var s = AssetsPage.state;
+  var timer = null;
+
+  c.querySelector('#assetSearch').addEventListener('input', function (e) {
+    clearTimeout(timer);
+    var v = e.target.value;
+    timer = setTimeout(function () { s.search = v; s.page = 1; AssetsPage.apply(c); }, 250);
+  });
+
+  ['category', 'status', 'location', 'ownership', 'department', 'warranty'].forEach(function (name) {
+    c.querySelector('#f_' + name).addEventListener('change', function (e) {
+      s.filters[name] = Array.prototype.slice.call(e.target.selectedOptions).map(function (o) { return o.value; });
+      if (!s.filters[name].length) delete s.filters[name];
+      s.page = 1;
+      if (name === 'status' && (s.filters.status || []).some(function (x) { return x === 'Retired' || x === 'Lost'; })) {
+        App.call('api_getAssets', true).then(function (rows) { s.rows = rows; AssetsPage.apply(c); });
+        return;
+      }
+      AssetsPage.apply(c);
+    });
+  });
+
+  c.querySelector('#btnClearFilters').onclick = function () {
+    s.filters = {}; s.search = ''; s.page = 1;
+    c.querySelector('#assetSearch').value = '';
+    c.querySelectorAll('select[id^=f_]').forEach(function (sel) {
+      Array.prototype.slice.call(sel.options).forEach(function (o) { o.selected = false; });
+    });
+    AssetsPage.apply(c);
+  };
+
+  c.querySelector('#prevPage').onclick = function () { if (s.page > 1) { s.page--; AssetsPage.renderTable(c); } };
+  c.querySelector('#nextPage').onclick = function () {
+    if (s.page * AssetsPage.PER_PAGE < s.filtered.length) { s.page++; AssetsPage.renderTable(c); }
+  };
+
+  c.querySelector('#btnRefresh').onclick = function () {
+    App.invalidateAssets();
+    App.route();
+  };
+
+  c.querySelector('#btnExport').onclick = function () {
+    var cols = ['asset_id', 'asset_tag', 'category', 'subcategory', 'make', 'model', 'serial_number', 'status',
+      'condition', 'ownership', 'assigned_to_name', 'assigned_to_email', 'department', 'location_name',
+      'purchase_date', 'purchase_cost', 'currency', 'vendor_name', 'warranty_end', 'amc_end', 'rental_end', 'specs', 'notes'];
+    var rows = s.filtered.map(function (a) {
+      return cols.map(function (k) {
+        var v = a[k];
+        if (['purchase_date', 'warranty_end', 'amc_end', 'rental_end'].indexOf(k) >= 0) return fmtDate(v);
+        return v === null || v === undefined ? '' : v;
+      });
+    });
+    CSV.download('assets_' + inputDate(new Date()) + '.csv', CSV.build(cols, rows));
+    UI.ok('Exported ' + rows.length + ' assets (current filtered set).');
+  };
+
+  c.querySelector('#btnCols').onclick = function () { AssetsPage.columnsModal(c); };
+
+  var add = c.querySelector('#btnAdd');
+  if (add) add.onclick = function () { AssetForm.open(null, function () { App.invalidateAssets(); App.route(); }); };
+  var imp = c.querySelector('#btnImport');
+  if (imp) imp.onclick = function () { App.go('#/import'); };
+};
+
+AssetsPage.columnsModal = function (c) {
+  var vis = AssetsPage.visibleCols();
+  var body = AssetsPage.COLS.map(function (col) {
+    return '<label class="row" style="gap:6px"><input type="checkbox" style="width:auto" data-col="' + col.key + '"' +
+      (vis.indexOf(col.key) >= 0 ? ' checked' : '') + '> ' + esc(col.label) + '</label>';
+  }).join('');
+  UI.modal({
+    title: 'Visible columns',
+    body: body,
+    buttons: [{ label: 'Apply', primary: true, onClick: function (ctx) {
+      var keys = [];
+      ctx.root.querySelectorAll('input[data-col]').forEach(function (i) { if (i.checked) keys.push(i.getAttribute('data-col')); });
+      if (!keys.length) throw new Error('Keep at least one column.');
+      AssetsPage.setVisibleCols(keys);
+      ctx.close();
+      AssetsPage.renderTable(c);
+    } }]
+  });
+};
+
+AssetsPage.apply = function (c) {
+  var s = AssetsPage.state;
+  var q = s.search.trim().toLowerCase();
+
+  s.filtered = s.rows.filter(function (a) {
+    if (q) {
+      var hay = [a.asset_id, a.asset_tag, a.serial_number, a.make, a.model, a.subcategory,
+        a.assigned_to_name, a.assigned_to_email].join(' ').toLowerCase();
+      if (hay.indexOf(q) < 0) return false;
+    }
+    var f = s.filters;
+    if (f.category && f.category.indexOf(a.category) < 0) return false;
+    if (f.status && f.status.indexOf(a.status) < 0) return false;
+    if (f.location && f.location.indexOf(a.location_id) < 0) return false;
+    if (f.ownership && f.ownership.indexOf(a.ownership) < 0) return false;
+    if (f.department && f.department.indexOf(a.department) < 0) return false;
+    if (f.warranty) {
+      var d = a.warranty_end ? daysUntil(a.warranty_end) : null;
+      var bucket = d === null ? 'None' : (d < 0 ? 'Expired' : (d <= 90 ? 'Expiring 90d' : 'Active'));
+      if (f.warranty.indexOf(bucket) < 0) return false;
+    }
+    return true;
+  });
+
+  AssetsPage.sortRows();
+  AssetsPage.renderChips(c);
+  AssetsPage.renderTable(c);
+};
+
+AssetsPage.sortRows = function () {
+  var s = AssetsPage.state;
+  var col = AssetsPage.COLS.filter(function (x) { return x.key === s.sort.key; })[0] || AssetsPage.COLS[0];
+  s.filtered.sort(function (x, y) {
+    var a = AssetsPage.value(col, x), b = AssetsPage.value(col, y);
+    if (col.date) { a = toDate(a) ? toDate(a).getTime() : -Infinity; b = toDate(b) ? toDate(b).getTime() : -Infinity; }
+    else if (col.num) { a = Number(a || 0); b = Number(b || 0); }
+    else { a = String(a === null || a === undefined ? '' : a).toLowerCase(); b = String(b === null || b === undefined ? '' : b).toLowerCase(); }
+    if (a < b) return -1 * s.sort.dir;
+    if (a > b) return 1 * s.sort.dir;
+    return 0;
+  });
+};
+
+AssetsPage.renderChips = function (c) {
+  var s = AssetsPage.state;
+  var chips = [];
+  Object.keys(s.filters).forEach(function (name) {
+    s.filters[name].forEach(function (v) {
+      var label = v;
+      if (name === 'location') { var l = App.location(v); label = l ? l.name : v; }
+      chips.push('<span class="chip">' + esc(name) + ': ' + esc(label) +
+        '<button data-chip="' + esc(name) + '" data-val="' + esc(v) + '">×</button></span>');
+    });
+  });
+  if (s.search) chips.push('<span class="chip">search: ' + esc(s.search) + '<button data-chip="__q" data-val="">×</button></span>');
+  var box = c.querySelector('#chips');
+  box.innerHTML = chips.join(' ');
+  box.querySelectorAll('button[data-chip]').forEach(function (b) {
+    b.onclick = function () {
+      var name = b.getAttribute('data-chip');
+      if (name === '__q') {
+        s.search = '';
+        c.querySelector('#assetSearch').value = '';
+      } else {
+        var v = b.getAttribute('data-val');
+        s.filters[name] = (s.filters[name] || []).filter(function (x) { return x !== v; });
+        if (!s.filters[name].length) delete s.filters[name];
+        var sel = c.querySelector('#f_' + name);
+        if (sel) Array.prototype.slice.call(sel.options).forEach(function (o) { if (o.value === v) o.selected = false; });
+      }
+      s.page = 1;
+      AssetsPage.apply(c);
+    };
+  });
+};
+
+AssetsPage.renderTable = function (c) {
+  var s = AssetsPage.state;
+  var vis = AssetsPage.visibleCols();
+  var cols = AssetsPage.COLS.filter(function (col) { return vis.indexOf(col.key) >= 0; });
+  var table = c.querySelector('#assetTable');
+
+  table.querySelector('thead').innerHTML = '<tr>' + cols.map(function (col) {
+    var arrow = s.sort.key === col.key ? (s.sort.dir > 0 ? ' ▲' : ' ▼') : '';
+    return '<th class="sortable' + (col.num ? ' num' : '') + '" data-sort="' + col.key + '">' + esc(col.label) + arrow + '</th>';
+  }).join('') + '</tr>';
+
+  var start = (s.page - 1) * AssetsPage.PER_PAGE;
+  var pageRows = s.filtered.slice(start, start + AssetsPage.PER_PAGE);
+
+  table.querySelector('tbody').innerHTML = pageRows.length ? pageRows.map(function (a) {
+    return '<tr class="clickable" data-id="' + esc(a.asset_id) + '">' + cols.map(function (col) {
+      var cell = col.html ? col.html(a) : esc(AssetsPage.value(col, a));
+      if (col.link) cell = '<a href="#/assets/' + encodeURIComponent(a.asset_id) + '">' + esc(a.asset_id) + '</a>';
+      return '<td' + (col.num ? ' class="num"' : '') + '>' + (cell === '' ? '<span class="muted">—</span>' : cell) + '</td>';
+    }).join('') + '</tr>';
+  }).join('') : '<tr><td colspan="' + cols.length + '" class="muted">No assets match these filters.</td></tr>';
+
+  table.querySelectorAll('th[data-sort]').forEach(function (th) {
+    th.onclick = function () {
+      var key = th.getAttribute('data-sort');
+      if (s.sort.key === key) s.sort.dir *= -1; else { s.sort.key = key; s.sort.dir = 1; }
+      AssetsPage.sortRows();
+      AssetsPage.renderTable(c);
+    };
+  });
+  table.querySelectorAll('tr[data-id]').forEach(function (tr) {
+    tr.onclick = function (e) {
+      if (e.target.tagName === 'A') return;
+      App.go('#/assets/' + encodeURIComponent(tr.getAttribute('data-id')));
+    };
+  });
+
+  c.querySelector('#assetCount').textContent = s.filtered.length + ' of ' + s.rows.length + ' assets';
+  var pages = Math.max(1, Math.ceil(s.filtered.length / AssetsPage.PER_PAGE));
+  c.querySelector('#pageInfo').textContent = 'Page ' + s.page + ' of ' + pages;
+  c.querySelector('#prevPage').disabled = s.page <= 1;
+  c.querySelector('#nextPage').disabled = s.page >= pages;
+};
+
+/* ------------------------------------------------------------ Add/Edit modal */
+
+var AssetForm = {
+  open: function (asset, onSaved) {
+    var isNew = !asset;
+    var a = asset || { ownership: 'Owned', status: 'In Stock', condition: 'New', currency: 'INR' };
+
+    var body =
+      '<fieldset><legend>Identification</legend><div class="grid2">' +
+        UI.field('Category', UI.select('f_category', App.cfg('category'), a.category), true) +
+        UI.field('Subcategory', UI.text('f_subcategory', a.subcategory)) +
+        UI.field('Make', UI.text('f_make', a.make), true) +
+        UI.field('Model', UI.text('f_model', a.model), true) +
+        UI.field('Serial number', UI.text('f_serial_number', a.serial_number)) +
+        UI.field('Asset tag', UI.text('f_asset_tag', a.asset_tag, 'placeholder="defaults to the asset id"')) +
+        UI.field('Status', UI.select('f_status', App.cfg('status'), a.status), true) +
+        UI.field('Condition', UI.select('f_condition', App.cfg('condition'), a.condition)) +
+        UI.field('Location', UI.select('f_location_id', UI.locationOptions(), a.location_id), true) +
+        UI.field('Specs', UI.text('f_specs', a.specs)) +
+      '</div></fieldset>' +
+
+      '<fieldset><legend>Purchase &amp; vendor</legend><div class="grid2">' +
+        UI.field('Ownership', UI.select('f_ownership', App.cfg('ownership'), a.ownership), true) +
+        UI.field('Purchase date', UI.date('f_purchase_date', a.purchase_date)) +
+        UI.field('Purchase cost', UI.text('f_purchase_cost', a.purchase_cost)) +
+        UI.field('Currency', UI.select('f_currency', App.cfg('currency'), a.currency || 'INR')) +
+        UI.field('PO number', UI.text('f_po_number', a.po_number)) +
+        UI.field('Invoice number', UI.text('f_invoice_number', a.invoice_number)) +
+        UI.field('Bought from', UI.select('f_vendor_id', UI.vendorOptions(), a.vendor_id)) +
+      '</div></fieldset>' +
+
+      '<fieldset id="rentalBlock"><legend>Rental / lease</legend><div class="grid2">' +
+        UI.field('Rental vendor', UI.select('f_rental_vendor_id', UI.vendorOptions(), a.rental_vendor_id), true) +
+        UI.field('Rental start', UI.date('f_rental_start', a.rental_start)) +
+        UI.field('Rental end', UI.date('f_rental_end', a.rental_end)) +
+      '</div></fieldset>' +
+
+      '<fieldset><legend>Warranty</legend><div class="grid2">' +
+        UI.field('Warranty start', UI.date('f_warranty_start', a.warranty_start)) +
+        UI.field('Warranty end', UI.date('f_warranty_end', a.warranty_end)) +
+      '</div></fieldset>' +
+
+      '<details' + (a.amc_vendor_id || a.amc_end ? ' open' : '') + '><summary>AMC</summary>' +
+        '<div class="grid2 mt8">' +
+          UI.field('AMC vendor', UI.select('f_amc_vendor_id', UI.vendorOptions(), a.amc_vendor_id)) +
+          UI.field('AMC start', UI.date('f_amc_start', a.amc_start)) +
+          UI.field('AMC end', UI.date('f_amc_end', a.amc_end)) +
+        '</div>' +
+      '</details>' +
+
+      '<fieldset class="mt12"><legend>Notes</legend>' +
+        '<textarea id="f_notes">' + esc(a.notes || '') + '</textarea>' +
+      '</fieldset>';
+
+    UI.modal({
+      title: isNew ? 'Add asset' : 'Edit ' + a.asset_id,
+      wide: true,
+      body: body,
+      buttons: [{
+        label: isNew ? 'Create asset' : 'Save changes',
+        primary: true,
+        onClick: function (ctx) {
+          var fields = AssetForm.collect(ctx.root);
+          var errs = AssetForm.validate(fields);
+          if (errs.length) throw new Error(errs.join('\n'));
+          return App.call('api_saveAsset', { asset_id: isNew ? '' : a.asset_id, fields: fields })
+            .then(function (saved) {
+              ctx.close();
+              UI.ok(isNew ? 'Created ' + saved.asset_id : 'Saved ' + saved.asset_id);
+              App.invalidateAssets();
+              if (onSaved) onSaved(saved);
+            });
+        }
+      }],
+      onOpen: function (root) {
+        var own = root.querySelector('#f_ownership');
+        var block = root.querySelector('#rentalBlock');
+        function sync() { block.style.display = own.value === 'Owned' ? 'none' : ''; }
+        own.addEventListener('change', sync);
+        sync();
+
+        // Status is driven by lifecycle actions once an asset exists.
+        var st = root.querySelector('#f_status');
+        if (isNew) {
+          Array.prototype.slice.call(st.options).forEach(function (o) {
+            if (['In Stock', 'Retired', 'Lost', 'Returned to Vendor'].indexOf(o.value) < 0 && o.value) o.disabled = true;
+          });
+          st.value = a.status || 'In Stock';
+        } else if (['Assigned', 'In Repair'].indexOf(a.status) >= 0) {
+          st.disabled = true;
+        }
+      }
+    });
+  },
+
+  FIELDS: ['asset_tag', 'category', 'subcategory', 'make', 'model', 'serial_number', 'status', 'condition',
+    'ownership', 'rental_vendor_id', 'rental_start', 'rental_end', 'location_id', 'purchase_date',
+    'purchase_cost', 'currency', 'po_number', 'invoice_number', 'vendor_id', 'warranty_start',
+    'warranty_end', 'amc_vendor_id', 'amc_start', 'amc_end', 'specs', 'notes'],
+
+  collect: function (root) {
+    var out = {};
+    AssetForm.FIELDS.forEach(function (f) {
+      var el = root.querySelector('#f_' + f);
+      out[f] = el ? el.value : '';
+    });
+    return out;
+  },
+
+  /** Client-side pass. The server re-validates and is the authority. */
+  validate: function (f) {
+    var errs = [];
+    ['category', 'make', 'model', 'status', 'ownership', 'location_id'].forEach(function (k) {
+      if (!String(f[k] || '').trim()) errs.push(k.replace(/_id$/, '').replace(/_/g, ' ') + ' is required.');
+    });
+    var noSerial = ['Furniture', 'Office Equipment', 'Consumable'];
+    if (!String(f.serial_number || '').trim() && noSerial.indexOf(f.category) < 0) {
+      errs.push('Serial number is required for category ' + (f.category || '(none)') + '.');
+    }
+    if (f.ownership && f.ownership !== 'Owned' && !f.rental_vendor_id) {
+      errs.push('Rental vendor is required when ownership is ' + f.ownership + '.');
+    }
+    if (f.purchase_cost && isNaN(Number(String(f.purchase_cost).replace(/,/g, '')))) {
+      errs.push('Purchase cost must be a number.');
+    }
+    return errs;
+  }
+};
+</script>

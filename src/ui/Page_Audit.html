@@ -1,0 +1,81 @@
+<script>
+/* --------------------------------------------------------------- Audit log
+ * Filter by entity, record, user and date range. Read-only, newest first.
+ */
+
+App.pages.audit = {
+  render: function (c, params) {
+    c.innerHTML =
+      '<div class="pagehead"><div><h1>Audit log</h1>' +
+      '<p class="sub">Every write, one row per changed field. Append-only.</p></div>' +
+      '<div class="actions"><button id="auditCsv">Export CSV</button></div></div>' +
+
+      '<div class="panel mb8"><div class="grid4">' +
+        '<div><div class="muted" style="font-size:11px">Entity</div>' +
+          UI.select('a_entity', ['Asset', 'Assignment', 'Maintenance', 'Employee', 'Location', 'Vendor'], params.entity || '') + '</div>' +
+        '<div><div class="muted" style="font-size:11px">Record ID</div>' +
+          UI.text('a_id', params.id || '', 'placeholder="e.g. AST-00042"') + '</div>' +
+        '<div><div class="muted" style="font-size:11px">User contains</div>' + UI.text('a_user', '') + '</div>' +
+        '<div><div class="muted" style="font-size:11px">From / to</div>' +
+          '<div class="row"><input type="date" id="a_from"><input type="date" id="a_to"></div></div>' +
+      '</div>' +
+      '<div class="row mt8"><button class="primary" id="a_apply">Apply</button>' +
+      '<button id="a_clear">Clear</button><span id="a_count" class="muted"></span></div></div>' +
+
+      '<div id="auditBody" class="loading">Loading…</div>';
+
+    var run = function () { Audit_.load(c); };
+    c.querySelector('#a_apply').onclick = run;
+    c.querySelector('#a_clear').onclick = function () {
+      ['a_entity', 'a_id', 'a_user', 'a_from', 'a_to'].forEach(function (id) { c.querySelector('#' + id).value = ''; });
+      run();
+    };
+    c.querySelector('#auditCsv').onclick = function () {
+      if (!Audit_.last) return;
+      CSV.download('audit_log_' + inputDate(new Date()) + '.csv', CSV.build(Audit_.last.headers, Audit_.last.rows));
+    };
+    run();
+  }
+};
+
+var Audit_ = {
+  last: null,
+
+  filters: function (c) {
+    return {
+      entity: c.querySelector('#a_entity').value,
+      entityId: c.querySelector('#a_id').value.trim(),
+      user: c.querySelector('#a_user').value.trim(),
+      from: c.querySelector('#a_from').value,
+      to: c.querySelector('#a_to').value,
+      limit: 500
+    };
+  },
+
+  load: function (c) {
+    var body = c.querySelector('#auditBody');
+    body.className = 'loading';
+    body.textContent = 'Loading…';
+    App.call('api_getAudit', Audit_.filters(c)).then(function (res) {
+      Audit_.last = res;
+      body.className = '';
+      var idx = {};
+      res.headers.forEach(function (h, i) { idx[h] = i; });
+      body.innerHTML = '<div class="tablewrap"><table class="data"><thead><tr>' +
+        res.headers.map(function (h) { return '<th>' + esc(h.replace(/_/g, ' ')) + '</th>'; }).join('') +
+        '</tr></thead><tbody>' +
+        (res.rows.map(function (r) {
+          return '<tr>' + r.map(function (v, i) {
+            if (i === idx.entity_id && String(v).indexOf('AST-') === 0) {
+              return '<td><a href="#/assets/' + encodeURIComponent(v) + '">' + esc(v) + '</a></td>';
+            }
+            return '<td>' + (v === '' || v === null ? '<span class="muted">—</span>' : esc(v)) + '</td>';
+          }).join('') + '</tr>';
+        }).join('') || '<tr><td colspan="' + res.headers.length + '" class="muted">No entries match these filters.</td></tr>') +
+        '</tbody></table></div>';
+      c.querySelector('#a_count').textContent =
+        'Showing ' + res.rows.length + ' of ' + res.total + ' entries' + (res.total > res.rows.length ? ' (narrow the filters to see more)' : '');
+    }).catch(function (e) { UI.error(e.message); body.className = ''; body.innerHTML = ''; });
+  }
+};
+</script>

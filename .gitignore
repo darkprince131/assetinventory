@@ -1,0 +1,9 @@
+.clasp.json
+.clasprc.json
+node_modules/
+web/public/
+netlify/functions/_lib/logic-bundle.js
+.netlify/
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,241 @@
+<script>
+/* ----------------------------------------------------------------- Masters
+ * Employees, Locations, Vendors, Users. Soft-deactivate only, never delete.
+ */
+
+var Masters = {
+  current: 'Employees',
+  rows: [],
+
+  DEFS: {
+    Employees: {
+      id: 'emp_id',
+      activeCol: 'status',
+      isActive: function (r) { return r.status !== 'Exited'; },
+      fields: [
+        { key: 'emp_id', label: 'Emp ID', type: 'text', idField: true, hint: 'blank = auto' },
+        { key: 'full_name', label: 'Name', type: 'text', req: true },
+        { key: 'email', label: 'Email', type: 'text', req: true },
+        { key: 'department', label: 'Department', type: 'select', options: function () { return App.cfg('department'); } },
+        { key: 'designation', label: 'Designation', type: 'text' },
+        { key: 'location_id', label: 'Location', type: 'select', options: function () { return UI.locationOptions(); }, display: function (r) { var l = App.location(r.location_id); return l ? l.name : r.location_id; } },
+        { key: 'manager_email', label: 'Manager', type: 'text' },
+        { key: 'status', label: 'Status', type: 'select', options: function () { return ['Active', 'Exited']; } },
+        { key: 'date_joined', label: 'Joined', type: 'date' },
+        { key: 'date_exited', label: 'Exited', type: 'date' }
+      ]
+    },
+    Locations: {
+      id: 'location_id',
+      activeCol: 'active',
+      isActive: function (r) { return r.active !== false; },
+      fields: [
+        { key: 'location_id', label: 'Location ID', type: 'text', idField: true, hint: 'blank = auto' },
+        { key: 'name', label: 'Name', type: 'text', req: true },
+        { key: 'type', label: 'Type', type: 'select', options: function () { return App.cfg('location_type'); }, req: true },
+        { key: 'city', label: 'City', type: 'text' },
+        { key: 'state', label: 'State', type: 'text' },
+        { key: 'country', label: 'Country', type: 'text' },
+        { key: 'address', label: 'Address', type: 'text' },
+        { key: 'active', label: 'Active', type: 'bool' }
+      ]
+    },
+    Vendors: {
+      id: 'vendor_id',
+      activeCol: 'active',
+      isActive: function (r) { return r.active !== false; },
+      fields: [
+        { key: 'vendor_id', label: 'Vendor ID', type: 'text', idField: true, hint: 'blank = auto' },
+        { key: 'name', label: 'Name', type: 'text', req: true },
+        { key: 'type', label: 'Type', type: 'text', hint: 'Supplier / Rental / AMC / Service' },
+        { key: 'contact_person', label: 'Contact', type: 'text' },
+        { key: 'email', label: 'Email', type: 'text' },
+        { key: 'phone', label: 'Phone', type: 'text' },
+        { key: 'gstin', label: 'GSTIN', type: 'text' },
+        { key: 'address', label: 'Address', type: 'text' },
+        { key: 'notes', label: 'Notes', type: 'text' },
+        { key: 'active', label: 'Active', type: 'bool' }
+      ]
+    },
+    Users: {
+      id: 'email',
+      activeCol: 'active',
+      isActive: function (r) { return r.active !== false; },
+      fields: [
+        { key: 'email', label: 'Email', type: 'text', idField: true, req: true },
+        { key: 'name', label: 'Name', type: 'text' },
+        { key: 'role', label: 'Role', type: 'select', options: function () { return ['Admin', 'Editor', 'Viewer']; }, req: true },
+        { key: 'active', label: 'Active', type: 'bool' }
+      ]
+    }
+  }
+};
+
+App.pages.masters = {
+  render: function (c, params) {
+    var names = Object.keys(Masters.DEFS);
+    var wanted = (params.tab || '').toLowerCase();
+    names.forEach(function (n) { if (n.toLowerCase() === wanted) Masters.current = n; });
+
+    c.innerHTML =
+      '<div class="pagehead"><div><h1>Masters</h1>' +
+      '<p class="sub">Records are deactivated, never deleted. ' +
+      (App.can('Admin') ? '' : 'Editing masters needs Admin access.') + '</p></div></div>' +
+      '<div class="tabs">' + names.map(function (n) {
+        return '<button data-mtab="' + n + '" class="' + (n === Masters.current ? 'active' : '') + '">' + n + '</button>';
+      }).join('') + '</div>' +
+      '<div class="row mb8"><input id="mSearch" placeholder="Filter…" style="max-width:280px">' +
+      '<label class="row" style="gap:6px"><input type="checkbox" id="mShowInactive" style="width:auto"> Show inactive</label></div>' +
+      '<div id="mBody" class="loading">Loading…</div>';
+
+    c.querySelectorAll('button[data-mtab]').forEach(function (b) {
+      b.onclick = function () { App.go('#/masters/' + b.getAttribute('data-mtab').toLowerCase()); };
+    });
+    c.querySelector('#mSearch').oninput = function () { Masters.renderTable(c); };
+    c.querySelector('#mShowInactive').onchange = function () { Masters.renderTable(c); };
+
+    Masters.load(c);
+  }
+};
+
+Masters.load = function (c) {
+  App.call('api_masterList', Masters.current).then(function (rows) {
+    Masters.rows = rows;
+    Masters.renderTable(c);
+  }).catch(function (e) { UI.error(e.message); c.querySelector('#mBody').innerHTML = ''; });
+};
+
+Masters.renderTable = function (c) {
+  var def = Masters.DEFS[Masters.current];
+  var q = (c.querySelector('#mSearch').value || '').trim().toLowerCase();
+  var showInactive = c.querySelector('#mShowInactive').checked;
+
+  var rows = Masters.rows.filter(function (r) {
+    if (!showInactive && !def.isActive(r)) return false;
+    if (!q) return true;
+    return def.fields.map(function (f) { return r[f.key]; }).join(' ').toLowerCase().indexOf(q) >= 0;
+  });
+
+  var head = '<tr>' + def.fields.map(function (f) { return '<th>' + esc(f.label) + '</th>'; }).join('') +
+    (App.can('Admin') ? '<th style="width:130px">Actions</th>' : '') + '</tr>';
+
+  var body = rows.map(function (r) {
+    return '<tr data-id="' + esc(r[def.id]) + '">' + def.fields.map(function (f) {
+      var v = f.display ? f.display(r) : r[f.key];
+      if (f.type === 'date') v = fmtDate(v);
+      if (f.type === 'bool') v = (v === false ? 'No' : 'Yes');
+      return '<td>' + (v === '' || v === null || v === undefined ? '<span class="muted">—</span>' : esc(v)) + '</td>';
+    }).join('') +
+    (App.can('Admin')
+      ? '<td class="nowrap"><button class="small" data-edit="' + esc(r[def.id]) + '">Edit</button> ' +
+        '<button class="small" data-toggle="' + esc(r[def.id]) + '">' + (def.isActive(r) ? 'Deactivate' : 'Reactivate') + '</button></td>'
+      : '') + '</tr>';
+  }).join('');
+
+  var addRow = App.can('Admin')
+    ? '<tr>' + def.fields.map(function (f) {
+        return '<td>' + Masters.input(f, 'add_', null) + '</td>';
+      }).join('') + '<td><button class="small primary" id="mAdd">Add</button></td></tr>'
+    : '';
+
+  c.querySelector('#mBody').className = '';
+  c.querySelector('#mBody').innerHTML =
+    '<div class="tablewrap"><table class="data"><thead>' + head + '</thead><tbody>' +
+    (body || '<tr><td colspan="' + (def.fields.length + 1) + '" class="muted">Nothing here yet.</td></tr>') +
+    '</tbody>' + (addRow ? '<tfoot>' + addRow + '</tfoot>' : '') + '</table></div>' +
+    '<p class="muted mt8">' + rows.length + ' of ' + Masters.rows.length + ' records</p>';
+
+  c.querySelectorAll('button[data-edit]').forEach(function (b) {
+    b.onclick = function () {
+      var id = b.getAttribute('data-edit');
+      var row = Masters.rows.filter(function (r) { return String(r[def.id]) === id; })[0];
+      Masters.editModal(c, row);
+    };
+  });
+  c.querySelectorAll('button[data-toggle]').forEach(function (b) {
+    b.onclick = function () {
+      var id = b.getAttribute('data-toggle');
+      var row = Masters.rows.filter(function (r) { return String(r[def.id]) === id; })[0];
+      var makeActive = !def.isActive(row);
+      UI.confirm(
+        (makeActive ? 'Reactivate' : 'Deactivate') + ' ' + Masters.current.replace(/s$/, ''),
+        (makeActive ? 'Reactivate ' : 'Deactivate ') + (row.full_name || row.name || row.email || id) + '?',
+        function () {
+          return App.call('api_masterToggle', Masters.current, id, makeActive).then(function (res) {
+            Masters.afterWrite(c, res);
+          });
+        },
+        makeActive ? 'Reactivate' : 'Deactivate'
+      );
+    };
+  });
+
+  var add = c.querySelector('#mAdd');
+  if (add) add.onclick = function () {
+    var obj = {};
+    def.fields.forEach(function (f) { obj[f.key] = Masters.readInput(c, f, 'add_'); });
+    UI.busy(add, 'Adding…', App.call('api_masterSave', Masters.current, obj)).then(function (res) {
+      UI.ok('Added ' + (res.saved[def.id] || ''));
+      Masters.afterWrite(c, res);
+    }).catch(function (e) { UI.error(e.message); });
+  };
+};
+
+Masters.input = function (f, prefix, row) {
+  var id = prefix + f.key;
+  var v = row ? row[f.key] : '';
+  if (f.type === 'select') return UI.select(id, f.options(), v);
+  if (f.type === 'date') return UI.date(id, v);
+  if (f.type === 'bool') return UI.select(id, [{ value: 'TRUE', label: 'Yes' }, { value: 'FALSE', label: 'No' }],
+    (row ? (row[f.key] === false ? 'FALSE' : 'TRUE') : 'TRUE'), { blank: '' });
+  return UI.text(id, v, f.hint ? 'placeholder="' + esc(f.hint) + '"' : '');
+};
+
+Masters.readInput = function (root, f, prefix) {
+  var el = root.querySelector('#' + prefix + f.key);
+  if (!el) return '';
+  return el.value;
+};
+
+Masters.editModal = function (c, row) {
+  var def = Masters.DEFS[Masters.current];
+  var body = '<div class="grid2">' + def.fields.map(function (f) {
+    var inner = f.idField
+      ? UI.text('ed_' + f.key, row[f.key], 'readonly')
+      : Masters.input(f, 'ed_', row);
+    return UI.field(f.label, inner, f.req);
+  }).join('') + '</div>';
+
+  UI.modal({
+    title: 'Edit ' + Masters.current.replace(/s$/, '') + ' ' + row[def.id],
+    wide: true,
+    body: body,
+    buttons: [{ label: 'Save', primary: true, onClick: function (ctx) {
+      var obj = {};
+      def.fields.forEach(function (f) { obj[f.key] = Masters.readInput(ctx.root, f, 'ed_'); });
+      obj[def.id] = row[def.id];
+      return App.call('api_masterSave', Masters.current, obj).then(function (res) {
+        ctx.close();
+        UI.ok('Saved ' + row[def.id]);
+        Masters.afterWrite(c, res);
+      });
+    } }]
+  });
+};
+
+/** Refreshes cached master lists everywhere, and warns about exited holders. */
+Masters.afterWrite = function (c, res) {
+  App.invalidateAssets();
+  App.call('api_bootstrap').then(function (boot) {
+    App.state.employees = boot.employees;
+    App.state.locations = boot.locations;
+    App.state.vendors = boot.vendors;
+    App.state.config = boot.config;
+    Masters.load(c);
+    if (res && res.flagged && res.flagged.length) {
+      UI.error('Still assigned to this exited employee — return or reassign them:\n' +
+        res.flagged.map(function (f) { return f.asset_id + ' ' + f.description; }).join('\n'));
+    }
+  });
+};
+</script>
