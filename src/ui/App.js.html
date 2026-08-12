@@ -54,9 +54,10 @@ var App = {
       document.getElementById('whoName').textContent = boot.user.name || boot.user.email;
       document.getElementById('whoRole').textContent = boot.user.role;
       var link = document.getElementById('sheetLink');
-      // A static build has no sheet behind it — do not offer a dead link.
-      if (App.state.mode === 'local') link.style.display = 'none';
-      else link.href = boot.sheetUrl;
+      // A demo build has no sheet behind it, and neither does the Postgres
+      // backend — do not offer a dead link in either case.
+      if (App.state.mode === 'local' || !boot.sheetUrl) link.style.display = 'none';
+      else { link.style.display = ''; link.href = boot.sheetUrl; }
       App.route();
     }).catch(function (e) {
       // The transport already rendered a sign-in screen; leave it alone.

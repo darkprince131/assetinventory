@@ -48,9 +48,11 @@ exports.handler = async function (event) {
 
   const user = session.fromRequest(event.headers || {});
   if (!user) {
+    // The client renders a different sign-in screen per mode.
     return reply(401, {
       ok: false,
       needsAuth: true,
+      authMode: env.authMode(),
       loginUrl: '/api/auth/login',
       error: 'Sign in to continue.'
     });

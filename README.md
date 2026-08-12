@@ -9,25 +9,27 @@ open the raw sheet and fix data by hand when something goes sideways.
 
 Setup instructions: [docs/SETUP.md](docs/SETUP.md).
 
-## Three deployments, one codebase
+## Four ways to deploy, one codebase
 
 | Target | Data | Auth | Use it for |
 |---|---|---|---|
-| **Apps Script** (`/src`) | The shared Google Sheet | Workspace login, free | The simplest real deployment — one click, no hosting |
-| **Netlify** (`--backend=http`) | The same shared Google Sheet, via the Sheets API | Google OAuth → signed cookie | A real deployment on your own domain |
-| **Netlify demo** (`--backend=demo`) | This browser's localStorage | A fake local user, role switchable | Demos and review with no credentials at all |
+| **Apps Script** (`/src`) | The shared Google Sheet | Workspace login, free | The simplest real deployment - one click, no hosting |
+| **Netlify + Supabase** | Postgres, nine typed tables | Email + password (scrypt) | A real deployment with no Google Cloud project at all |
+| **Netlify + Sheets** | The same shared Google Sheet, via the Sheets API | Google OAuth | A real deployment that keeps the sheet as the database |
+| **Netlify demo** | This browser's localStorage | A fake local user, role switchable | Demos and review with no credentials at all |
 
-All three run the *same* `/src/*.gs` business logic — not a port of it. Apps Script runs it
-natively; Netlify Functions run it in a `vm` with the Apps Script globals supplied; the demo
-build runs it in the browser over localStorage. `Sheets.gs` was always the only file allowed
-to touch `SpreadsheetApp`, and that is the seam all three hang off.
+All four run the *same* `/src/*.gs` business logic - not a port of it. Apps Script runs
+it natively; the Netlify functions run it in a `vm` with the Apps Script globals
+supplied; the demo build runs it in the browser. `Sheets.gs` was always the only file
+allowed to touch `SpreadsheetApp`, and that is the seam all four hang off.
 
 ```bash
 node web/build.js --backend=demo && npx --yes serve web/public
 ```
 
-Setup for the hosted versions: [docs/SETUP.md](docs/SETUP.md) (Apps Script),
-[docs/NETLIFY.md](docs/NETLIFY.md) (Netlify, including the Google Cloud steps).
+Setup guides: [docs/SETUP.md](docs/SETUP.md) (Apps Script),
+[docs/SUPABASE.md](docs/SUPABASE.md) (Netlify + Postgres, no Google Cloud),
+[docs/NETLIFY.md](docs/NETLIFY.md) (Netlify + Sheets, architecture and security notes).
 
 ## What it does
 
@@ -65,15 +67,19 @@ Setup for the hosted versions: [docs/SETUP.md](docs/SETUP.md) (Apps Script),
     host-browser.js Apps Script host objects over localStorage (demo build)
     local-transport.js  demo transport, seeding and demo bar
     http-transport.js   transport that calls the Netlify backend
-/netlify/functions  Netlify backend — zero runtime dependencies
+/netlify/functions  Netlify backend - zero runtime dependencies
   api.js            the single JSON endpoint
-  auth-*.js         Google OAuth redirect flow
-  _lib/             env, session cookies, Sheets REST, the grid, the vm runtime
+  auth-*.js         Google OAuth flow, and password sign-in for Supabase
+  _lib/             env, sessions, the shared grid, both storage adapters, the runtime
+/supabase
+  schema.sql        GENERATED Postgres schema
 /tools
   build-logic.js    bundles /src/*.gs for the functions
+  build-supabase-sql.js  generates supabase/schema.sql from DB.SCHEMA
 /docs
   SETUP.md          Apps Script setup
-  NETLIFY.md        Netlify setup, architecture, security notes, limitations
+  SUPABASE.md       Netlify + Postgres setup (no Google Cloud)
+  NETLIFY.md        Netlify + Sheets setup, architecture, security notes
 netlify.toml
 ```
 

@@ -27,6 +27,12 @@
   to = "/.netlify/functions/auth-logout"
   status = 200
 
+# Password sign-in, used when the data backend is Supabase.
+[[redirects]]
+  from = "/api/auth/password"
+  to = "/.netlify/functions/auth-password"
+  status = 200
+
 [[redirects]]
   from = "/api"
   to = "/.netlify/functions/api"

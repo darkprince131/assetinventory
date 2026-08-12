@@ -14,7 +14,14 @@
 
 const vm = require('vm');
 const bundle = require('./logic-bundle');
-const sheetsHost = require('./sheets-host');
+const env = require('./env');
+
+/** Backends are interchangeable: same contract, different store. */
+function backend() {
+  return env.dataBackend() === 'supabase'
+    ? require('./supabase-host')
+    : require('./sheets-host');
+}
 
 /** Functions that may write. Everything else must leave the sheet untouched. */
 const MUTATING = new Set([
@@ -117,15 +124,12 @@ function createSandbox(user, host) {
   return sandbox;
 }
 
-/** { tab: { columnName: type } } read straight off DB.SCHEMA. */
-function schemaTypes(sandbox) {
+/** { tab: [[columnName, type], …] } read straight off DB.SCHEMA. */
+function schemaCols(sandbox) {
   const out = {};
   const schema = sandbox.DB && sandbox.DB.SCHEMA;
   if (!schema) throw new Error('The logic bundle did not define DB.SCHEMA.');
-  Object.keys(schema).forEach(tab => {
-    out[tab] = {};
-    schema[tab].cols.forEach(c => { out[tab][c[0]] = c[1]; });
-  });
+  Object.keys(schema).forEach(tab => { out[tab] = schema[tab].cols; });
   return out;
 }
 
@@ -139,7 +143,8 @@ async function run(fn, args, user) {
     throw Object.assign(new Error('Unknown or disallowed function: ' + fn), { status: 400 });
   }
 
-  const host = sheetsHost.createHost();
+  const store = backend();
+  const host = store.createHost();
   const sandbox = createSandbox(user, host);
   const target = sandbox[fn];
   if (typeof target !== 'function') {
@@ -151,9 +156,9 @@ async function run(fn, args, user) {
   const started = Date.now();
 
   try {
-    if (mutating) release = await sheetsHost.acquireLock(user.email + ' · ' + fn);
+    if (mutating) release = await store.acquireLock(user.email + ' · ' + fn);
 
-    await host.load(schemaTypes(sandbox));
+    await host.load(schemaCols(sandbox));
 
     if (ADMIN.has(fn)) requireAdminOrFirstRun(sandbox, fn);
 
@@ -191,4 +196,4 @@ function requireAdminOrFirstRun(sandbox, fn) {
   sandbox.Auth.require('Admin');
 }
 
-module.exports = { run, MUTATING, READING, ADMIN, _createSandbox: createSandbox, _schemaTypes: schemaTypes };
+module.exports = { run, MUTATING, READING, ADMIN, backend, _createSandbox: createSandbox, _schemaCols: schemaCols };
