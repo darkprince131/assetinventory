@@ -340,6 +340,27 @@ var UI = {
     return '<input type="date" id="' + name + '" value="' + esc(inputDate(value)) + '">';
   },
 
+  /**
+   * Which of these masters have no usable rows yet. A required dropdown with
+   * nothing in it is the first thing a new deployment hits, so say so rather
+   * than showing an empty select.
+   */
+  missingMasters: function (names) {
+    var missing = [];
+    if (names.indexOf('locations') >= 0 && !UI.locationOptions().length) missing.push('Locations');
+    if (names.indexOf('vendors') >= 0 && !UI.vendorOptions().length) missing.push('Vendors');
+    if (names.indexOf('employees') >= 0 && !UI.employeeOptions(false).length) missing.push('Employees');
+    return missing;
+  },
+
+  masterWarning: function (missing, why) {
+    if (!missing.length) return '';
+    var list = missing.length === 1 ? missing[0]
+      : missing.slice(0, -1).join(', ') + ' or ' + missing[missing.length - 1];
+    return '<div class="warnbar">No ' + esc(list) + ' yet' + (why ? ' — ' + esc(why) : '') +
+      '. Add them under <a href="#/masters">Masters</a> first, or use Bulk Import.</div>';
+  },
+
   employeeOptions: function (includeExited) {
     return App.state.employees
       .filter(function (e) { return includeExited || e.status !== 'Exited'; })

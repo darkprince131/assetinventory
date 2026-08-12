@@ -184,7 +184,8 @@ var Detail = {
   assignModal: function (a, done) {
     UI.modal({
       title: 'Assign ' + a.asset_id,
-      body: '<p class="muted">' + esc([a.make, a.model].filter(Boolean).join(' ')) + '</p>' +
+      body: UI.masterWarning(UI.missingMasters(['employees']), 'you can only assign to an active employee') +
+        '<p class="muted">' + esc([a.make, a.model].filter(Boolean).join(' ')) + '</p>' +
         UI.field('Employee', UI.select('m_emp', UI.employeeOptions(false), ''), true) +
         UI.field('Location', UI.select('m_loc', UI.locationOptions(), a.location_id), true) +
         UI.field('Condition handed over', UI.select('m_cond', App.cfg('condition'), a.condition)) +

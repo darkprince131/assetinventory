@@ -327,7 +327,12 @@ var AssetForm = {
     var isNew = !asset;
     var a = asset || { ownership: 'Owned', status: 'In Stock', condition: 'New', currency: 'INR' };
 
+    // A required dropdown with nothing in it is the first thing a new
+    // deployment hits. Say what is missing instead of showing an empty select.
+    var missing = UI.missingMasters(['locations', 'vendors']);
+
     var body =
+      UI.masterWarning(missing, 'every asset needs a location') +
       '<fieldset><legend>Identification</legend><div class="grid2">' +
         UI.field('Category', UI.select('f_category', App.cfg('category'), a.category), true) +
         UI.field('Subcategory', UI.text('f_subcategory', a.subcategory)) +

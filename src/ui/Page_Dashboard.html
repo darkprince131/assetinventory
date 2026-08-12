@@ -67,10 +67,37 @@ var Dash = {
         }).join('')
       : '<p class="muted">No activity logged yet.</p>';
 
+    // First run: an empty dashboard says nothing about what to do next.
+    var gettingStarted = '';
+    if (!d.cards.total) {
+      var have = {
+        locations: App.state.locations.length,
+        vendors: App.state.vendors.length,
+        employees: App.state.employees.length
+      };
+      var step = function (done, text) {
+        return '<li style="margin-bottom:4px">' +
+          (done ? '<span class="dot ok"></span>' : '<span class="dot none"></span>') + text + '</li>';
+      };
+      gettingStarted =
+        '<div class="panel mt12"><h2>Getting started</h2>' +
+        '<p class="muted">Nothing is created implicitly, so load the masters before the assets.</p>' +
+        '<ol style="margin:0;padding-left:18px">' +
+          step(have.locations, 'Add your <a href="#/masters/locations">Locations</a>' +
+            (have.locations ? ' — ' + have.locations + ' so far' : '')) +
+          step(have.vendors, 'Add your <a href="#/masters/vendors">Vendors</a>' +
+            (have.vendors ? ' — ' + have.vendors + ' so far' : '')) +
+          step(have.employees, 'Add your <a href="#/masters/employees">Employees</a>' +
+            (have.employees ? ' — ' + have.employees + ' so far' : '')) +
+          step(false, 'Then add assets one at a time, or use <a href="#/import">Bulk Import</a>') +
+        '</ol></div>';
+    }
+
     return '' +
       '<div class="pagehead"><div><h1>Dashboard</h1>' +
       '<p class="sub">As at ' + fmtDateTime(d.generatedAt) + '</p></div>' +
       '<div class="actions"><button id="refreshDash">Refresh</button></div></div>' +
+      gettingStarted +
 
       '<div class="grid3" style="grid-template-columns:repeat(6,1fr)">' + cards + '</div>' +
 
